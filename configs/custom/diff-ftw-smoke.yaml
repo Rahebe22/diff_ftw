@@ -1,0 +1,53 @@
+trainer:
+  max_epochs: 1
+  limit_train_batches: 2
+  limit_val_batches: 1
+  log_every_n_steps: 1
+  accelerator: cpu
+  devices: 1
+  default_root_dir: ./work_dir/diffusion_ssl_smoke
+  callbacks:
+    - class_path: lightning.pytorch.callbacks.ModelCheckpoint
+      init_args:
+        monitor: val_loss
+        mode: min
+        save_top_k: 1
+        save_last: true
+
+model:
+  class_path: ftw_ma.diffusion_task.FTWDiffusionSSLTask
+  init_args:
+    in_channels: 4
+    lr: 2e-4
+    weight_decay: 1e-4
+    timesteps: 100
+    noise_schedule: linear
+    beta_start: 1e-6
+    beta_end: 0.02
+    loss: mse
+    model: ftw_efficientnet
+    backbone: efficientnet-b7
+    weights: true
+    scheduler: cosine
+    t_max: 1
+    eta_min: 1e-5
+    model_kwargs:
+      time_embedding_dim: 64
+
+data:
+  class_path: ftw_ma.ssl_datamodule.FTWMapAfricaSSLDataModule
+  init_args:
+    batch_size: 1
+    num_workers: 0
+    num_samples: 2
+    data_dir: /home/airg/rabedi/thesis/diffusion/pretrain_data_random_1
+    catalog: /home/airg/rabedi/thesis/diffusion/pretrain_data_random_1/catalog.csv
+    split_column: usage
+    img_path_cols: [image]
+    crop_size: null
+    use_augmentations: false
+    normalization_strategy: min_max
+    normalization_stat_procedure: lab
+    global_stats: null
+    img_clip_val: 0
+    nodata: []

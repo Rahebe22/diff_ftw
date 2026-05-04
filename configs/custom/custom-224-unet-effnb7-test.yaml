@@ -1,0 +1,32 @@
+trainer:
+  max_epochs: 1
+  accelerator: cpu
+  default_root_dir: ./work_dir/test
+  devices: 1
+
+model:
+  class_path: ftw_ma.trainers.CustomSemanticSegmentationTask
+  init_args:
+    model: unet
+    backbone: efficientnet-b7
+    weights: true
+    in_channels: 4
+    num_classes: 3
+
+data:
+  class_path: ftw_ma.datamodule.FTWMapAfricaDataModule
+  init_args:
+    temporal_options: windowB
+    batch_size: 32
+    num_workers: 0
+    num_samples: -1
+    data_dir: /home/airg/data/labels/cropland
+    catalog: /home/airg/rabedi/thesis/ftw-mappingafrica-integration/croplands3-2.1.1_test_ftw.csv
+    crop_size: 224
+    normalization_strategy: min_max
+    normalization_stat_procedure: lab
+    random_shuffle: false
+    global_stats:
+      min: [203.5]
+      max: [4590.4]
+    img_clip_val: 0

@@ -1,0 +1,61 @@
+trainer:
+  max_epochs: 300
+  log_every_n_steps: 10
+  accelerator: cuda
+  devices: [0, 1]
+  strategy: ddp_find_unused_parameters_true
+  default_root_dir: ./work_dir/diffusion_ssl_300ep_es5
+  callbacks:
+    - class_path: lightning.pytorch.callbacks.ModelCheckpoint
+      init_args:
+        monitor: val_loss
+        mode: min
+        save_top_k: 1
+        save_last: true
+        filename: '{epoch}-{val_loss:.4f}'
+    - class_path: lightning.pytorch.callbacks.EarlyStopping
+      init_args:
+        monitor: val_loss
+        mode: min
+        patience: 5
+        min_delta: 0.0
+
+model:
+  class_path: ftw_ma.diffusion_task.FTWDiffusionSSLTask
+  init_args:
+    in_channels: 4
+    lr: 2e-4
+    weight_decay: 1e-4
+    betas: [0.9, 0.999]
+    timesteps: 10000
+    noise_schedule: linear
+    beta_start: 1e-6
+    beta_end: 0.02
+    loss: mse
+    model: ftw_efficientnet
+    backbone: efficientnet-b7
+    weights: true
+    scheduler: cosinewarm
+    t_0: 30
+    t_mult: 2
+    eta_min: 1e-5
+    model_kwargs:
+      time_embedding_dim: 128
+
+data:
+  class_path: ftw_ma.ssl_datamodule.FTWMapAfricaSSLDataModule
+  init_args:
+    batch_size: 20
+    num_workers: 4
+    num_samples: -1
+    data_dir: /home/airg/rabedi/thesis/diffusion/pretrain_data_random_1
+    catalog: /home/airg/rabedi/thesis/diffusion/pretrain_data_random_1/catalog.csv
+    split_column: usage
+    img_path_cols: [image]
+    crop_size: null
+    use_augmentations: false
+    normalization_strategy: min_max
+    normalization_stat_procedure: lab
+    global_stats: null
+    img_clip_val: 0
+    nodata: []
