@@ -20,7 +20,7 @@ class FTWMapAfricaSSL(torch.utils.data.Dataset):
     def __init__(
         self,
         catalog: str,
-        data_dir: str = None,
+        data_dir: Optional[str] = None,
         split: str = "train",
         split_column: str = "split",
         img_path_cols: Optional[Union[str, List[str]]] = None,
@@ -28,7 +28,9 @@ class FTWMapAfricaSSL(torch.utils.data.Dataset):
         num_samples: int = -1,
         normalization_strategy: str = "min_max",
         normalization_stat_procedure: str = "lab",
-        global_stats: Optional[Union[Dict[str, Any], Tuple, List]] = None,
+        global_stats: Optional[
+            Union[Dict[str, Any], Tuple[Any, ...], List[Any]]
+        ] = None,
         img_clip_val: float = 0,
         nodata: list = None,
         transforms: Optional[Callable[[dict[str, Tensor]], dict[str, Tensor]]] = None,
@@ -125,22 +127,26 @@ class FTWMapAfricaSSLDataModule(LightningDataModule):
 
     def __init__(
         self,
+        catalog: str,
+        data_dir: Optional[str] = None,
+        split_column: str = "split",
+        img_path_cols: Optional[List[str]] = None,
+        temporal_options: str = "windowB",
+        num_samples: int = -1,
+        img_clip_val: float = 0,
+        nodata: Optional[List[float]] = None,
         batch_size: int = 32,
         num_workers: int = 0,
         pin_memory: bool = True,
         prefetch_factor: int = 4,
         drop_last_train: bool = True,
-        global_stats: Optional[Union[Dict[str, Any], Tuple, List]] = None,
+        global_stats: Optional[Dict[str, List[float]]] = None,
         normalization_strategy: str = "min_max",
         normalization_stat_procedure: str = "lab",
         crop_size: Optional[Union[int, Tuple[int, int]]] = None,
         use_augmentations: bool = True,
-        **kwargs,
     ):
         super().__init__()
-        if "split" in kwargs:
-            raise ValueError("Cannot specify split in FTWMapAfricaSSLDataModule")
-
         if isinstance(crop_size, int):
             crop_size = (crop_size, crop_size)
         elif crop_size is None:
@@ -158,7 +164,16 @@ class FTWMapAfricaSSLDataModule(LightningDataModule):
         self.normalization_stat_procedure = normalization_stat_procedure
         self.crop_size = crop_size
         self.use_augmentations = use_augmentations
-        self.kwargs = kwargs
+        self.kwargs = {
+            "catalog": catalog,
+            "data_dir": data_dir,
+            "split_column": split_column,
+            "img_path_cols": img_path_cols,
+            "temporal_options": temporal_options,
+            "num_samples": num_samples,
+            "img_clip_val": img_clip_val,
+            "nodata": nodata,
+        }
 
         augs = []
         if self.use_augmentations:
