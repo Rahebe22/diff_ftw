@@ -85,6 +85,13 @@ From the CLI, the model can be trained as follows:
 ftw_ma model fit -c configs/<config-file>.yaml
 ```
 
+For multi-GPU DDP training, use the standalone Lightning launcher so worker
+processes relaunch the same command:
+
+```bash
+python run_lightning_fit.py fit -c configs/<config-file>.yaml
+```
+
 See the [example config](configs/example-config.yaml) for settings.
 
 <config-file>.yaml should be named to be informative of the experiment, e.g. `fullcat-ftwbaseline-exp2.yaml` for the second experiment using the full combined catalog and FTW Baseline model.
