@@ -21,10 +21,18 @@ model:
     lr: 2e-4
     weight_decay: 1e-4
     timesteps: 100
-    noise_schedule: linear
+    noise_schedule: cosine
     beta_start: 1e-6
     beta_end: 0.02
+    cosine_s: 0.008
+    max_beta: 0.999
     loss: mse
+    min_snr_gamma: 5.0
+    centered_inputs: true
+    ema_decay: 0.9999
+    use_ema_for_validation: true
+    val_timestep_bins: 10
+    export_encoder_on_train_end: true
     model: ftw_efficientnet
     backbone: efficientnet-b7
     weights: true
@@ -33,6 +41,7 @@ model:
     eta_min: 1e-5
     model_kwargs:
       time_embedding_dim: 64
+      time_condition_dim: 256
 
 data:
   class_path: ftw_ma.ssl_datamodule.FTWMapAfricaSSLDataModule

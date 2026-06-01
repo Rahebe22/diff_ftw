@@ -26,6 +26,7 @@ from torchmetrics.classification import (
     MulticlassRecall,
 )
 from torchvision.models._api import WeightsEnum
+from .checkpoints import load_diffusion_encoder_checkpoint
 from .losses import *
 from ftw.metrics import get_object_level_metrics
 
@@ -315,6 +316,15 @@ class CustomSemanticSegmentationTask(BaseTask):
             }
             self.model.load_state_dict(model_state_dict, strict=True)
             print("Successfully loaded model weights")
+        elif isinstance(weights, str) and weights.endswith(('.pt', '.pth')):
+            print(f"Loading diffusion encoder weights from checkpoint: {weights}")
+            checkpoint = load_diffusion_encoder_checkpoint(
+                self.model.encoder, weights
+            )
+            print(
+                "Successfully loaded diffusion "
+                f"{checkpoint['source']} encoder weights"
+            )
 
         # patch weights (if needed)
         if patch_weights:

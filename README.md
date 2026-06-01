@@ -96,6 +96,20 @@ CKPT=/path/to/checkpoint/checkpoint.ckpt
 ftw_ma model fit -c configs/<config-file>.yaml --ckpt_path $CKPT
 ```
 
+Diffusion SSL training exports the EMA EfficientNet encoder as
+`<default_root_dir>/encoder_ema.pt`. To transfer that encoder into the
+field-boundary segmentation U-Net, set the downstream model weights to the
+exported file:
+
+```yaml
+model:
+  init_args:
+    model: unet
+    backbone: efficientnet-b7
+    in_channels: 4
+    weights: /path/to/encoder_ema.pt
+```
+
 To test the model:
 
 ```bash
@@ -113,4 +127,3 @@ Or run the `tester.sh` script:
 <moidel_dir_name> is the name of the model directory under `~/working/models/`, e.g. `fullcat-ftwbaseline-exp2` where the model checkpoint is stored. <version_number> is the version number of the training run, specified explicitly as an integer, or if left empty the latest version is found and run. <catalog> is the path to the catalog CSV file, e.g. `data/ftw-mappingafrica-combined-catalog.csv`. 
 
 This will produce an output metrics file in a specified directory, with a file name composed of the experiment name and catalog used in testing. The script is currently hard-coded for the validation split.
-
