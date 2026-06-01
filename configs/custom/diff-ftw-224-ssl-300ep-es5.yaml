@@ -2,7 +2,7 @@ trainer:
   max_epochs: 300
   log_every_n_steps: 10
   accelerator: cuda
-  devices: [0, 1]
+  devices: [0, 1, 2, 3, 4, 5, 6, 7]
   strategy: ddp_find_unused_parameters_false
   precision: 16-mixed
   default_root_dir: /home/ubuntu/working/models/diffusion_ssl_300ep_es5
@@ -57,6 +57,9 @@ data:
   init_args:
     batch_size: 20
     num_workers: 4
+    pin_memory: true
+    prefetch_factor: 4
+    drop_last_train: true
     num_samples: -1
     data_dir: /mnt/s3_pretrain
     catalog: /mnt/s3_pretrain/catalog_all.csv

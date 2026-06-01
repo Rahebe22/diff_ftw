@@ -127,6 +127,9 @@ class FTWMapAfricaSSLDataModule(LightningDataModule):
         self,
         batch_size: int = 32,
         num_workers: int = 0,
+        pin_memory: bool = True,
+        prefetch_factor: int = 4,
+        drop_last_train: bool = True,
         global_stats: Optional[Union[Dict[str, Any], Tuple, List]] = None,
         normalization_strategy: str = "min_max",
         normalization_stat_procedure: str = "lab",
@@ -147,6 +150,9 @@ class FTWMapAfricaSSLDataModule(LightningDataModule):
 
         self.batch_size = batch_size
         self.num_workers = num_workers
+        self.pin_memory = pin_memory
+        self.prefetch_factor = prefetch_factor
+        self.drop_last_train = drop_last_train
         self.global_stats = global_stats
         self.normalization_strategy = normalization_strategy
         self.normalization_stat_procedure = normalization_stat_procedure
@@ -184,6 +190,11 @@ class FTWMapAfricaSSLDataModule(LightningDataModule):
         print(f"[SSLDataModule] img_path_cols={self.kwargs.get('img_path_cols')}")
         print(f"[SSLDataModule] temporal_options={self.kwargs.get('temporal_options', 'windowB')}")
         print(f"[SSLDataModule] batch_size={self.batch_size}, num_workers={self.num_workers}")
+        print(
+            f"[SSLDataModule] pin_memory={self.pin_memory}, "
+            f"prefetch_factor={self.prefetch_factor}, "
+            f"drop_last_train={self.drop_last_train}"
+        )
         print(f"[SSLDataModule] crop_size={self.crop_size}, num_samples={self.kwargs.get('num_samples', -1)}")
         print(f"[SSLDataModule] use_augmentations={self.use_augmentations}")
 
@@ -236,8 +247,8 @@ class FTWMapAfricaSSLDataModule(LightningDataModule):
             self.train_dataset,
             batch_size=self.batch_size,
             shuffle=True,
-            num_workers=self.num_workers,
-            persistent_workers=self.num_workers > 0,
+            drop_last=self.drop_last_train,
+            **self._loader_kwargs(),
         )
 
     def val_dataloader(self):
@@ -246,8 +257,7 @@ class FTWMapAfricaSSLDataModule(LightningDataModule):
             self.val_dataset,
             batch_size=self.batch_size,
             shuffle=False,
-            num_workers=self.num_workers,
-            persistent_workers=self.num_workers > 0,
+            **self._loader_kwargs(),
         )
 
     def test_dataloader(self):
@@ -255,9 +265,18 @@ class FTWMapAfricaSSLDataModule(LightningDataModule):
             self.test_dataset,
             batch_size=self.batch_size,
             shuffle=False,
-            num_workers=self.num_workers,
-            persistent_workers=self.num_workers > 0,
+            **self._loader_kwargs(),
         )
+
+    def _loader_kwargs(self) -> dict[str, Any]:
+        kwargs = {
+            "num_workers": self.num_workers,
+            "persistent_workers": self.num_workers > 0,
+            "pin_memory": self.pin_memory,
+        }
+        if self.num_workers > 0:
+            kwargs["prefetch_factor"] = self.prefetch_factor
+        return kwargs
 
     def on_after_batch_transfer(self, batch: dict[str, Tensor], dataloader_idx: int):
         if self.trainer and self.trainer.training and self.train_aug is not None:

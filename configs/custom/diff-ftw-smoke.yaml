@@ -48,6 +48,8 @@ data:
   init_args:
     batch_size: 1
     num_workers: 0
+    pin_memory: false
+    drop_last_train: false
     num_samples: 2
     data_dir: /home/airg/rabedi/thesis/diffusion/pretrain_data_random_1
     catalog: /home/airg/rabedi/thesis/diffusion/pretrain_data_random_1/catalog.csv
