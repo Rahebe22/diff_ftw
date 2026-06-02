@@ -123,3 +123,28 @@ def test_timestep_conditioned_unet_forward_pass():
         )
 
     assert output.shape == (2, 4, 32, 32)
+
+
+def test_timestep_conditioned_unet_has_no_unused_trainable_parameters():
+    from ftw_ma.diffusion_task import FTWEfficientNetDiffusionModel
+
+    model = FTWEfficientNetDiffusionModel(
+        in_channels=4,
+        backbone="efficientnet-b0",
+        weights=None,
+        time_embedding_dim=16,
+        time_condition_dim=32,
+    )
+    output = model(
+        torch.randn(2, 4, 32, 32),
+        torch.tensor([0, 999]),
+    )
+
+    output.mean().backward()
+
+    unused = [
+        name
+        for name, parameter in model.named_parameters()
+        if parameter.requires_grad and parameter.grad is None
+    ]
+    assert unused == []

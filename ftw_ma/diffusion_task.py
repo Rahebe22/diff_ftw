@@ -81,7 +81,7 @@ class FTWEfficientNetDiffusionModel(torch.nn.Module):
         self.encoder_time_conditioners = torch.nn.ModuleList(
             [
                 TimestepFiLM(channels, time_condition_dim)
-                for channels in self.model.encoder.out_channels
+                for channels in self.model.encoder.out_channels[1:]
             ]
         )
         self.decoder_time_conditioners = torch.nn.ModuleList(
@@ -118,13 +118,16 @@ class FTWEfficientNetDiffusionModel(torch.nn.Module):
         t_emb = get_timestep_embedding(t, self.time_embedding_dim).to(x.device)
         time_condition = self.time_mlp(t_emb)
         features = self.model.encoder(x)
-        if len(features) != len(self.encoder_time_conditioners):
+        if len(features) != len(self.encoder_time_conditioners) + 1:
             raise RuntimeError("Unexpected number of EfficientNet feature maps")
         features = [
-            conditioner(feature, time_condition)
-            for conditioner, feature in zip(
-                self.encoder_time_conditioners, features
-            )
+            features[0],
+            *[
+                conditioner(feature, time_condition)
+                for conditioner, feature in zip(
+                    self.encoder_time_conditioners, features[1:]
+                )
+            ],
         ]
         self._active_time_condition = time_condition
         try:
