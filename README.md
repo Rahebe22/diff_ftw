@@ -93,8 +93,9 @@ chips and an AWS `p3` instance with eight GPUs.
 
 This pipeline combines established ideas from several papers; it is not a
 verbatim implementation of a single published model. The diagrams in this
-README are project-authored summaries. The table below links to useful figures
-in the original papers rather than reproducing them.
+README are project-authored summaries. The canonical figures displayed below
+are loaded from the arXiv paper-source renderer, attributed to their original
+papers, and linked back to those papers.
 
 ```mermaid
 flowchart TD
@@ -121,6 +122,106 @@ flowchart TD
 | U-Net denoiser | [Ronneberger, Fischer, and Brox (2015)](https://arxiv.org/abs/1505.04597) | [Figure 1: contracting and expanding paths](https://arxiv.org/pdf/1505.04597#page=2) | Combine coarse semantic context with high-resolution skip features while predicting noise at the original image resolution. |
 | EfficientNet encoder | [Tan and Le (2019)](https://proceedings.mlr.press/v97/tan19a.html) | [Figure 2: compound scaling](https://proceedings.mlr.press/v97/tan19a/tan19a.pdf#page=2) | Preserve the downstream EfficientNet-B7 backbone so learned weights transfer directly into field-boundary segmentation. |
 | FiLM conditioning | [Perez et al. (2018)](https://arxiv.org/abs/1709.07871) | [Figure 2: feature-wise affine modulation](https://arxiv.org/pdf/1709.07871#page=2) | Adapt FiLM to inject the diffusion timestep into consumed encoder scales and decoder blocks without altering the EfficientNet architecture. |
+
+#### Diffusion foundation
+
+<table>
+  <tr>
+    <td><img src="https://ar5iv.labs.arxiv.org/html/1503.03585/assets/x1.png" alt="Structured data distribution"></td>
+    <td>&rarr;</td>
+    <td><img src="https://ar5iv.labs.arxiv.org/html/1503.03585/assets/x2.png" alt="Partially noised data distribution"></td>
+    <td>&rarr;</td>
+    <td><img src="https://ar5iv.labs.arxiv.org/html/1503.03585/assets/x3.png" alt="Gaussian-noised data distribution"></td>
+    <td>Forward diffusion</td>
+  </tr>
+  <tr>
+    <td><img src="https://ar5iv.labs.arxiv.org/html/1503.03585/assets/x4.png" alt="Restored data distribution"></td>
+    <td>&larr;</td>
+    <td><img src="https://ar5iv.labs.arxiv.org/html/1503.03585/assets/x5.png" alt="Partially restored data distribution"></td>
+    <td>&larr;</td>
+    <td><img src="https://ar5iv.labs.arxiv.org/html/1503.03585/assets/x6.png" alt="Gaussian distribution before restoration"></td>
+    <td>Learned reverse process</td>
+  </tr>
+</table>
+
+**[Sohl-Dickstein et al. (2015), Figure 1](https://arxiv.org/pdf/1503.03585#page=3).**
+The original diffusion-model paper illustrates a structured data distribution
+being gradually corrupted into a Gaussian distribution, then restored by a
+learned reverse process. This project trains the denoising representation but
+does not currently implement reverse-process image sampling.
+
+#### Forward noising and the cosine schedule
+
+<table>
+  <tr>
+    <td width="50%">
+      <a href="https://proceedings.mlr.press/v139/nichol21a/nichol21a.pdf#page=4">
+        <img src="https://ar5iv.labs.arxiv.org/html/2102.09672/assets/linear_vs_cosine.png" alt="Linear and cosine forward noising schedules from Improved DDPM Figure 3">
+      </a>
+    </td>
+    <td width="50%">
+      <a href="https://proceedings.mlr.press/v139/nichol21a/nichol21a.pdf#page=4">
+        <img src="https://ar5iv.labs.arxiv.org/html/2102.09672/assets/x4.png" alt="Alpha-bar values for linear and cosine schedules from Improved DDPM Figure 5">
+      </a>
+    </td>
+  </tr>
+  <tr>
+    <td><strong>Nichol and Dhariwal (2021), Figure 3.</strong> The linear schedule destroys image information earlier; the cosine schedule adds noise more gradually.</td>
+    <td><strong>Nichol and Dhariwal (2021), Figure 5.</strong> The cosine schedule preserves signal for more of the diffusion trajectory. This pipeline uses that 1,000-step cosine schedule.</td>
+  </tr>
+</table>
+
+#### Min-SNR loss weighting
+
+<p align="center">
+  <a href="https://arxiv.org/pdf/2303.09556#page=1">
+    <img src="https://ar5iv.labs.arxiv.org/html/2303.09556/assets/x1.png" alt="Min-SNR convergence speedup from Hang et al. Figure 1" width="540">
+  </a>
+</p>
+
+**Hang et al. (2023), Figure 1.** Min-SNR weighting was introduced to reduce
+conflicting optimization directions across noise timesteps. Their reported
+experiment converges `3.4x` faster than the baseline. This pipeline uses the
+paper's established default `gamma = 5.0`.
+
+#### U-Net denoiser
+
+<p align="center">
+  <a href="https://arxiv.org/pdf/1505.04597#page=2">
+    <img src="https://ar5iv.labs.arxiv.org/html/1505.04597/assets/x1.png" alt="Original U-Net architecture from Ronneberger et al. Figure 1" width="760">
+  </a>
+</p>
+
+**Ronneberger, Fischer, and Brox (2015), Figure 1.** The contracting path
+captures context; the expanding path combines that context with copied
+high-resolution features. The diffusion denoiser uses this multiscale pattern
+to predict noise at the original chip resolution.
+
+#### Timestep conditioning with FiLM
+
+<p align="center">
+  <a href="https://arxiv.org/pdf/1709.07871#page=2">
+    <img src="https://ar5iv.labs.arxiv.org/html/1709.07871/assets/FiLM.png" alt="Feature-wise linear modulation from Perez et al. Figure 2" width="230">
+  </a>
+</p>
+
+**Perez et al. (2018), Figure 2.** FiLM applies a feature-wise scale
+`gamma` and shift `beta`. This pipeline adapts that conditioning mechanism:
+the diffusion timestep generates a scale and shift for consumed EfficientNet
+feature maps and U-Net decoder blocks.
+
+#### EfficientNet encoder
+
+<p align="center">
+  <a href="https://proceedings.mlr.press/v97/tan19a/tan19a.pdf#page=2">
+    <img src="https://ar5iv.labs.arxiv.org/html/1905.11946/assets/x2.png" alt="EfficientNet compound scaling from Tan and Le Figure 2" width="760">
+  </a>
+</p>
+
+**Tan and Le (2019), Figure 2.** EfficientNet balances network width, depth,
+and resolution through compound scaling. This project preserves the
+EfficientNet-B7 encoder architecture so its pretrained weights can transfer
+strictly into the downstream field-boundary model.
 
 Centered inputs, EMA validation weights, timestep-binned validation metrics,
 and strict encoder-only export are training and evaluation conventions for this
