@@ -427,6 +427,7 @@ The current AWS configuration expects:
 ```text
 data_dir: /mnt/s3_pretrain
 catalog:  /mnt/s3_pretrain/catalog_train_validate_80_20.csv
+catalog_cache_dir: /home/ubuntu/working/ssl_catalog_cache
 ```
 
 The catalog contains a `usage` column with `train` and `validate` values. The
@@ -448,11 +449,24 @@ The generated catalog is a data artifact and should not be committed to Git.
 Upload it to the mounted bucket so it appears at the configured
 `/mnt/s3_pretrain/catalog_train_validate_80_20.csv` path on the AWS instance.
 
-Validating all 5,850,538 holdout chips after every epoch is also expensive.
-Use `--trainer.limit_val_batches=20` for the short benchmark. Before the full
-run, choose the validation policy intentionally: scan the complete holdout,
-validate a stable subset, or replace the temporary split with a smaller
-geography-aware holdout.
+Before the first full run on an AWS instance, build a compact catalog cache on
+local instance storage:
+
+```bash
+python scripts/build_ssl_catalog_cache.py \
+  --catalog /mnt/s3_pretrain/catalog_train_validate_80_20.csv \
+  --output-dir /home/ubuntu/working/ssl_catalog_cache
+```
+
+This is a one-time sequential scan of the CSV. It does not copy the imagery.
+It writes compact path and offset files that can be memory-mapped by every DDP
+rank instead of repeatedly expanding millions of paths into Python objects.
+
+Validating all 5,850,538 holdout chips after every epoch is also expensive. The
+full-run configuration uses a stable distributed subset of `200` validation
+batches per rank. Before a final scientific comparison, choose the validation
+policy intentionally: use a larger stable subset, scan the complete holdout, or
+replace the temporary split with a smaller geography-aware holdout.
 
 ### AWS data loading and DDP
 
@@ -462,6 +476,8 @@ The current first-tier throughput settings are implemented in
 
 ```text
 mounted S3 bucket: /mnt/s3_pretrain
+  -> local memory-mapped catalog cache
+  -> constant-memory distributed index shuffle
   -> persistent DataLoader workers: 4 per GPU rank
   -> prefetch queue: factor = 4
   -> pinned host memory
@@ -479,6 +495,7 @@ mounted S3 bucket: /mnt/s3_pretrain
 | `prefetch_factor` | `4` | Prepare upcoming batches |
 | `pin_memory` | `true` | Improve host-to-GPU transfer |
 | `drop_last_train` | `true` | Keep distributed training batches regular |
+| `use_constant_memory_sampler` | `true` | Shuffle distributed indices without allocating a full 23-million-element permutation per rank |
 
 For multi-GPU pretraining, use
 [`run_lightning_fit.py`](run_lightning_fit.py). This standalone Lightning
@@ -547,6 +564,7 @@ python run_lightning_fit.py fit \
 | [`ftw_ma/diffusion_task.py`](ftw_ma/diffusion_task.py) | Denoiser, FiLM conditioning, weighted training objective, EMA validation, diagnostics, and encoder export |
 | [`diffusion/scheduler.py`](diffusion/scheduler.py) | Cosine schedule, forward noising process, timestep embeddings, SNR calculation, and Min-SNR weights |
 | [`ftw_ma/ssl_datamodule.py`](ftw_ma/ssl_datamodule.py) | Image-only SSL dataset and DataLoader throughput settings |
+| [`scripts/build_ssl_catalog_cache.py`](scripts/build_ssl_catalog_cache.py) | One-time local memory-mapped path-cache builder for the large SSL catalog |
 | [`ftw_ma/checkpoints.py`](ftw_ma/checkpoints.py) | Strict encoder-export checkpoint format |
 | [`run_lightning_fit.py`](run_lightning_fit.py) | Standalone Lightning DDP launcher |
 | [`tests/test_diffusion_pipeline.py`](tests/test_diffusion_pipeline.py) | Schedule, weighting, transfer, forward-pass, and no-unused-parameter regression tests |

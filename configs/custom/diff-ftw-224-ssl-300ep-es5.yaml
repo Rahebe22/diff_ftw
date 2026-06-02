@@ -1,9 +1,12 @@
 trainer:
   max_epochs: 300
+  limit_val_batches: 200
+  num_sanity_val_steps: 0
   log_every_n_steps: 10
   accelerator: cuda
   devices: [0, 1, 2, 3, 4, 5, 6, 7]
   strategy: ddp_find_unused_parameters_false
+  use_distributed_sampler: false
   precision: 16-mixed
   default_root_dir: /home/ubuntu/working/models/diffusion_ssl_300ep_es5
   callbacks:
@@ -63,6 +66,7 @@ data:
     num_samples: -1
     data_dir: /mnt/s3_pretrain
     catalog: /mnt/s3_pretrain/catalog_train_validate_80_20.csv
+    catalog_cache_dir: /home/ubuntu/working/ssl_catalog_cache
     split_column: usage
     img_path_cols: [image]
     crop_size: null
@@ -72,3 +76,4 @@ data:
     global_stats: null
     img_clip_val: 0
     nodata: []
+    use_constant_memory_sampler: true
