@@ -128,7 +128,7 @@ class FTWEfficientNetDiffusionModel(torch.nn.Module):
         ]
         self._active_time_condition = time_condition
         try:
-            decoder_output = self.model.decoder(*features)
+            decoder_output = self.model.decoder(features)
         finally:
             self._active_time_condition = None
         return self.model.segmentation_head(decoder_output)

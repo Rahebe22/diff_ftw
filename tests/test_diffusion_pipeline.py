@@ -102,3 +102,24 @@ def test_timestep_conditioning_keeps_smp_encoder_unchanged():
     assert baseline_state.keys() == conditioned_state.keys()
     for key in baseline_state:
         assert baseline_state[key].shape == conditioned_state[key].shape
+
+
+def test_timestep_conditioned_unet_forward_pass():
+    from ftw_ma.diffusion_task import FTWEfficientNetDiffusionModel
+
+    model = FTWEfficientNetDiffusionModel(
+        in_channels=4,
+        backbone="efficientnet-b0",
+        weights=None,
+        time_embedding_dim=16,
+        time_condition_dim=32,
+    )
+    model.eval()
+
+    with torch.inference_mode():
+        output = model(
+            torch.randn(2, 4, 32, 32),
+            torch.tensor([0, 999]),
+        )
+
+    assert output.shape == (2, 4, 32, 32)
