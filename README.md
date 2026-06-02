@@ -173,6 +173,12 @@ because the SMP U-Net decoder does not consume it. Creating a trainable FiLM
 layer for that discarded feature would leave unused parameters in the DDP
 graph.
 
+SMP also retains the EfficientNet `_conv_head` and `_bn1` classification-tail
+layers in the encoder state dictionary, although its U-Net feature-pyramid
+forward path does not execute them. They remain present for strict downstream
+encoder transfer, but are frozen during diffusion pretraining so DDP does not
+track inert trainable parameters.
+
 The default configuration uses:
 
 | Setting | Value | Purpose |

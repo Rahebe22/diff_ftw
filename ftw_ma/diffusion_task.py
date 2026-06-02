@@ -73,6 +73,7 @@ class FTWEfficientNetDiffusionModel(torch.nn.Module):
             classes=in_channels,
             **unet_kwargs,
         )
+        self._freeze_unused_encoder_tail()
         self.time_mlp = torch.nn.Sequential(
             torch.nn.Linear(time_embedding_dim, time_condition_dim),
             torch.nn.SiLU(),
@@ -95,6 +96,14 @@ class FTWEfficientNetDiffusionModel(torch.nn.Module):
                 "decoder_channels must describe every SMP U-Net decoder block"
             )
         self._register_decoder_time_hooks()
+
+    def _freeze_unused_encoder_tail(self) -> None:
+        # SMP retains these EfficientNet classification-tail layers, but its
+        # feature-pyramid forward path used by U-Net does not execute them.
+        for name in ("_conv_head", "_bn1"):
+            module = getattr(self.model.encoder, name, None)
+            if module is not None:
+                module.requires_grad_(False)
 
     def _register_decoder_time_hooks(self) -> None:
         for handle in self._decoder_hook_handles:
@@ -606,7 +615,11 @@ class FTWDiffusionSSLTask(L.LightningModule):
 
     def configure_optimizers(self):
         optimizer = AdamW(
-            self.model.parameters(),
+            (
+                parameter
+                for parameter in self.model.parameters()
+                if parameter.requires_grad
+            ),
             lr=self.hparams.lr,
             weight_decay=self.hparams.weight_decay,
             betas=tuple(self.hparams.betas),

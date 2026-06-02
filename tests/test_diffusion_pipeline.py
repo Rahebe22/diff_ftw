@@ -104,6 +104,22 @@ def test_timestep_conditioning_keeps_smp_encoder_unchanged():
         assert baseline_state[key].shape == conditioned_state[key].shape
 
 
+def test_unused_efficientnet_classification_tail_is_frozen():
+    from ftw_ma.diffusion_task import FTWEfficientNetDiffusionModel
+
+    model = FTWEfficientNetDiffusionModel(
+        in_channels=4,
+        backbone="efficientnet-b0",
+        weights=None,
+        time_embedding_dim=16,
+        time_condition_dim=32,
+    )
+
+    for name in ("_conv_head", "_bn1"):
+        module = getattr(model.model.encoder, name)
+        assert all(not parameter.requires_grad for parameter in module.parameters())
+
+
 def test_timestep_conditioned_unet_forward_pass():
     from ftw_ma.diffusion_task import FTWEfficientNetDiffusionModel
 
