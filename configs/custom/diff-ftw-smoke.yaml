@@ -1,18 +1,15 @@
 trainer:
   max_epochs: 1
-  limit_train_batches: 2
+  limit_train_batches: 3
   limit_val_batches: 1
+  num_sanity_val_steps: 0
   log_every_n_steps: 1
-  accelerator: cpu
-  devices: 1
-  default_root_dir: ./work_dir/diffusion_ssl_smoke
-  callbacks:
-    - class_path: lightning.pytorch.callbacks.ModelCheckpoint
-      init_args:
-        monitor: val_loss
-        mode: min
-        save_top_k: 1
-        save_last: true
+  accelerator: cuda
+  devices: [0, 1, 2, 3, 4, 5, 6, 7]
+  strategy: ddp_find_unused_parameters_false
+  precision: 16-mixed
+  enable_checkpointing: false
+  default_root_dir: /home/ubuntu/working/models/diffusion_ssl_smoke
 
 model:
   class_path: ftw_ma.diffusion_task.FTWDiffusionSSLTask
@@ -20,7 +17,8 @@ model:
     in_channels: 4
     lr: 2e-4
     weight_decay: 1e-4
-    timesteps: 100
+    betas: [0.9, 0.999]
+    timesteps: 1000
     noise_schedule: cosine
     beta_start: 1e-6
     beta_end: 0.02
@@ -32,16 +30,17 @@ model:
     ema_decay: 0.9999
     use_ema_for_validation: true
     val_timestep_bins: 10
-    export_encoder_on_train_end: true
+    export_encoder_on_train_end: false
     model: ftw_efficientnet
     backbone: efficientnet-b7
     weights: true
-    scheduler: cosine
-    t_max: 1
+    scheduler: cosinewarm
+    t_0: 30
+    t_mult: 2
     eta_min: 1e-5
     model_kwargs:
-      time_embedding_dim: 64
-      time_condition_dim: 256
+      time_embedding_dim: 128
+      time_condition_dim: 512
 
 data:
   class_path: ftw_ma.ssl_datamodule.FTWMapAfricaSSLDataModule
@@ -50,9 +49,9 @@ data:
     num_workers: 0
     pin_memory: false
     drop_last_train: false
-    num_samples: 2
-    data_dir: /home/airg/rabedi/thesis/diffusion/pretrain_data_random_1
-    catalog: /home/airg/rabedi/thesis/diffusion/pretrain_data_random_1/catalog.csv
+    num_samples: -1
+    data_dir: /mnt/s3_pretrain
+    catalog: configs/custom/diff-ftw-smoke-catalog.csv
     split_column: usage
     img_path_cols: [image]
     crop_size: null

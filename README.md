@@ -354,7 +354,22 @@ stage image shards on local NVMe or EBS and compare images per second.
 
 ### Running diffusion pretraining
 
-First run a short eight-GPU benchmark:
+First run the tiny eight-GPU smoke test:
+
+```bash
+python run_lightning_fit.py fit \
+  -c configs/custom/diff-ftw-smoke.yaml
+```
+
+The smoke configuration uses the same EfficientNet-B7 denoiser and DDP strategy
+as the full run, but reads only 32 training chips and 16 validation chips from
+[`configs/custom/diff-ftw-smoke-catalog.csv`](configs/custom/diff-ftw-smoke-catalog.csv).
+This avoids repeatedly scanning the 29-million-row catalog while debugging
+startup and distributed-training errors. On the first backward pass, the task
+also reports whether any online model parameters failed to receive gradients.
+
+After the smoke test completes, run a short eight-GPU throughput benchmark with
+the full catalog:
 
 ```bash
 python run_lightning_fit.py fit \

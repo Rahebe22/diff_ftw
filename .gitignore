@@ -24,6 +24,7 @@ work_dir/
 logs/
 train/
 *.csv
+!configs/custom/diff-ftw-smoke-catalog.csv
 *.tsv
 *.parquet
 *.h5

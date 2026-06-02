@@ -173,6 +173,7 @@ class FTWDiffusionSSLTask(L.LightningModule):
         self.save_hyperparameters()
         self._printed_train_batch = False
         self._printed_val_batch = False
+        self._checked_unused_parameters = False
         self._best_val_sample = None
         self._val_loss_sum = None
         self._val_loss_count = None
@@ -364,6 +365,28 @@ class FTWDiffusionSSLTask(L.LightningModule):
 
     def training_step(self, batch: dict[str, Tensor], batch_idx: int) -> Tensor:
         return self._shared_step(batch, "train")
+
+    def on_after_backward(self) -> None:
+        if self._checked_unused_parameters:
+            return
+        self._checked_unused_parameters = True
+        unused = [
+            name
+            for name, parameter in self.model.named_parameters()
+            if parameter.requires_grad and parameter.grad is None
+        ]
+        if not self.trainer.is_global_zero:
+            return
+        if unused:
+            print(
+                "[DiffusionTask] Online model parameters without gradients: "
+                + ", ".join(unused)
+            )
+        else:
+            print(
+                "[DiffusionTask] All online model trainable parameters "
+                "received gradients"
+            )
 
     def validation_step(self, batch: dict[str, Tensor], batch_idx: int) -> Tensor:
         loss, artifacts = self._shared_step(batch, "val", return_artifacts=True)
