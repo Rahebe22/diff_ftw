@@ -497,6 +497,13 @@ mounted S3 bucket: /mnt/s3_pretrain
 | `drop_last_train` | `true` | Keep distributed training batches regular |
 | `use_constant_memory_sampler` | `true` | Shuffle distributed indices without allocating a full 23-million-element permutation per rank |
 
+The diffusion AWS configs also enable `loader_startup_diagnostics`. During the
+first lazy S3 batch read, each DDP rank reports when it begins waiting and when
+its first batch becomes available. Rank zero prints a heartbeat every `30`
+seconds while it is still waiting, and each worker reports its first image-read
+time once. Later batches remain quiet so the diagnostics do not add meaningful
+training overhead.
+
 For multi-GPU pretraining, use
 [`run_lightning_fit.py`](run_lightning_fit.py). This standalone Lightning
 launcher ensures that every DDP child process relaunches the same valid command.

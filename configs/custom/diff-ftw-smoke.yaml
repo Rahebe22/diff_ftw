@@ -52,6 +52,8 @@ data:
     num_samples: -1
     data_dir: /mnt/s3_pretrain
     catalog: configs/custom/diff-ftw-smoke-catalog.csv
+    loader_startup_diagnostics: true
+    loader_startup_log_interval_seconds: 30
     split_column: usage
     img_path_cols: [image]
     crop_size: null

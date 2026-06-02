@@ -1,5 +1,8 @@
 import math
 import mmap
+import os
+import threading
+import time
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
@@ -10,9 +13,96 @@ import torch
 import torch.distributed as dist
 from lightning import LightningDataModule
 from torch import Tensor
-from torch.utils.data import DataLoader, Sampler
+from torch.utils.data import DataLoader, Sampler, get_worker_info
 
 from .dataset import load_image
+
+
+def _distributed_rank() -> int:
+    if dist.is_available() and dist.is_initialized():
+        return dist.get_rank()
+    return int(os.environ.get("RANK", "0"))
+
+
+class DiagnosticDataLoader(DataLoader):
+    """Report progress while the first lazily loaded batch is prepared."""
+
+    def __init__(
+        self,
+        *args,
+        startup_diagnostics: bool = False,
+        startup_log_interval_seconds: float = 30,
+        split: str = "train",
+        **kwargs,
+    ) -> None:
+        if startup_log_interval_seconds <= 0:
+            raise ValueError("startup_log_interval_seconds must be positive")
+        self.startup_diagnostics = startup_diagnostics
+        self.startup_log_interval_seconds = startup_log_interval_seconds
+        self.split = split
+        self._reported_startup = False
+        super().__init__(*args, **kwargs)
+
+    def __iter__(self):
+        if not self.startup_diagnostics or self._reported_startup:
+            yield from super().__iter__()
+            return
+
+        rank = _distributed_rank()
+        start = time.monotonic()
+        print(
+            f"[SSLDataModule] rank={rank} waiting for first {self.split} batch",
+            flush=True,
+        )
+        stop_heartbeat = threading.Event()
+        heartbeat = None
+        if rank == 0:
+            heartbeat = threading.Thread(
+                target=self._log_waiting_heartbeat,
+                args=(stop_heartbeat, start),
+                daemon=True,
+            )
+            heartbeat.start()
+
+        try:
+            iterator = super().__iter__()
+            first_batch = next(iterator)
+        except StopIteration:
+            self._reported_startup = True
+            elapsed = time.monotonic() - start
+            print(
+                f"[SSLDataModule] rank={rank} {self.split} dataloader is empty "
+                f"after {elapsed:.2f}s",
+                flush=True,
+            )
+            return
+        finally:
+            stop_heartbeat.set()
+            if heartbeat is not None:
+                heartbeat.join()
+
+        self._reported_startup = True
+        elapsed = time.monotonic() - start
+        print(
+            f"[SSLDataModule] rank={rank} first {self.split} batch ready: "
+            f"{elapsed:.2f}s",
+            flush=True,
+        )
+        yield first_batch
+        yield from iterator
+
+    def _log_waiting_heartbeat(
+        self,
+        stop_heartbeat: threading.Event,
+        start: float,
+    ) -> None:
+        while not stop_heartbeat.wait(self.startup_log_interval_seconds):
+            elapsed = time.monotonic() - start
+            print(
+                f"[SSLDataModule] rank=0 still waiting for first {self.split} "
+                f"batch: {elapsed:.0f}s elapsed",
+                flush=True,
+            )
 
 
 class MMapSSLPaths:
@@ -146,6 +236,7 @@ class FTWMapAfricaSSL(torch.utils.data.Dataset):
         img_clip_val: float = 0,
         nodata: list = None,
         transforms: Optional[Callable[[dict[str, Tensor]], dict[str, Tensor]]] = None,
+        loader_startup_diagnostics: bool = False,
     ) -> None:
         if split not in self.valid_splits:
             raise ValueError(f"split must be one of {self.valid_splits}, got {split}")
@@ -164,6 +255,8 @@ class FTWMapAfricaSSL(torch.utils.data.Dataset):
         self.img_clip_val = img_clip_val
         self.nodata = nodata
         self.transforms = transforms
+        self.loader_startup_diagnostics = loader_startup_diagnostics
+        self._reported_first_image_read = False
 
         if catalog_cache_dir is not None:
             if self.img_path_cols is None:
@@ -218,15 +311,7 @@ class FTWMapAfricaSSL(torch.utils.data.Dataset):
 
     def __getitem__(self, index: int) -> dict[str, Tensor]:
         images = [
-            load_image(
-                self.data_dir / filename,
-                nodata_val_ls=self.nodata,
-                apply_normalization=True,
-                normal_strategy=self.normalization_strategy,
-                stat_procedure=self.normalization_stat_procedure,
-                global_stats=self.global_stats,
-                clip_val=self.img_clip_val,
-            )
+            self._load_image(filename)
             for filename in self.filenames[index]
         ]
         image = torch.from_numpy(np.concatenate(images, axis=0).astype("float32")).float()
@@ -234,6 +319,50 @@ class FTWMapAfricaSSL(torch.utils.data.Dataset):
         if self.transforms is not None:
             sample = self.transforms(sample)
         return sample
+
+    def _load_image(self, filename: str) -> np.ndarray:
+        path = self.data_dir / filename
+        report_read = (
+            self.loader_startup_diagnostics and not self._reported_first_image_read
+        )
+        if report_read:
+            self._reported_first_image_read = True
+            worker = get_worker_info()
+            worker_id = worker.id if worker is not None else "main"
+            rank = _distributed_rank()
+            start = time.monotonic()
+            print(
+                f"[SSLData] rank={rank} worker={worker_id} reading first image: "
+                f"{path}",
+                flush=True,
+            )
+        try:
+            image = load_image(
+                path,
+                nodata_val_ls=self.nodata,
+                apply_normalization=True,
+                normal_strategy=self.normalization_strategy,
+                stat_procedure=self.normalization_stat_procedure,
+                global_stats=self.global_stats,
+                clip_val=self.img_clip_val,
+            )
+        except Exception:
+            if report_read:
+                elapsed = time.monotonic() - start
+                print(
+                    f"[SSLData] rank={rank} worker={worker_id} first image read "
+                    f"failed after {elapsed:.2f}s: {path}",
+                    flush=True,
+                )
+            raise
+        if report_read:
+            elapsed = time.monotonic() - start
+            print(
+                f"[SSLData] rank={rank} worker={worker_id} first image ready: "
+                f"shape={image.shape}, {elapsed:.2f}s",
+                flush=True,
+            )
+        return image
 
 
 class FTWMapAfricaSSLDataModule(LightningDataModule):
@@ -256,6 +385,8 @@ class FTWMapAfricaSSLDataModule(LightningDataModule):
         prefetch_factor: int = 4,
         drop_last_train: bool = True,
         use_constant_memory_sampler: bool = False,
+        loader_startup_diagnostics: bool = False,
+        loader_startup_log_interval_seconds: float = 30,
         global_stats: Optional[Dict[str, List[float]]] = None,
         normalization_strategy: str = "min_max",
         normalization_stat_procedure: str = "lab",
@@ -276,6 +407,10 @@ class FTWMapAfricaSSLDataModule(LightningDataModule):
         self.prefetch_factor = prefetch_factor
         self.drop_last_train = drop_last_train
         self.use_constant_memory_sampler = use_constant_memory_sampler
+        self.loader_startup_diagnostics = loader_startup_diagnostics
+        self.loader_startup_log_interval_seconds = (
+            loader_startup_log_interval_seconds
+        )
         self.global_stats = global_stats
         self.normalization_strategy = normalization_strategy
         self.normalization_stat_procedure = normalization_stat_procedure
@@ -291,6 +426,7 @@ class FTWMapAfricaSSLDataModule(LightningDataModule):
             "num_samples": num_samples,
             "img_clip_val": img_clip_val,
             "nodata": nodata,
+            "loader_startup_diagnostics": loader_startup_diagnostics,
         }
 
         augs = []
@@ -332,6 +468,12 @@ class FTWMapAfricaSSLDataModule(LightningDataModule):
         print(
             "[SSLDataModule] use_constant_memory_sampler="
             f"{self.use_constant_memory_sampler}"
+        )
+        print(
+            "[SSLDataModule] loader_startup_diagnostics="
+            f"{self.loader_startup_diagnostics}, "
+            "loader_startup_log_interval_seconds="
+            f"{self.loader_startup_log_interval_seconds}"
         )
         print(
             f"[SSLDataModule] crop_size={self.crop_size}, "
@@ -384,35 +526,56 @@ class FTWMapAfricaSSLDataModule(LightningDataModule):
 
     def train_dataloader(self):
         print("[SSLDataModule] creating train dataloader")
-        sampler = self._sampler(self.train_dataset, shuffle=True)
-        return DataLoader(
+        return self._dataloader(
             self.train_dataset,
-            batch_size=self.batch_size,
-            shuffle=sampler is None,
-            sampler=sampler,
+            split="train",
+            shuffle=True,
             drop_last=self.drop_last_train,
-            **self._loader_kwargs(),
         )
 
     def val_dataloader(self):
         print("[SSLDataModule] creating validation dataloader")
-        sampler = self._sampler(self.val_dataset, shuffle=False)
-        return DataLoader(
+        return self._dataloader(
             self.val_dataset,
-            batch_size=self.batch_size,
+            split="validation",
             shuffle=False,
-            sampler=sampler,
-            **self._loader_kwargs(),
         )
 
     def test_dataloader(self):
-        sampler = self._sampler(self.test_dataset, shuffle=False)
-        return DataLoader(
+        return self._dataloader(
             self.test_dataset,
-            batch_size=self.batch_size,
+            split="test",
             shuffle=False,
+        )
+
+    def _dataloader(
+        self,
+        dataset,
+        split: str,
+        shuffle: bool,
+        drop_last: bool = False,
+    ) -> DataLoader:
+        sampler = self._sampler(dataset, shuffle=shuffle)
+        kwargs = self._loader_kwargs()
+        loader = DataLoader
+        if self.loader_startup_diagnostics:
+            loader = DiagnosticDataLoader
+            kwargs.update(
+                {
+                    "startup_diagnostics": True,
+                    "startup_log_interval_seconds": (
+                        self.loader_startup_log_interval_seconds
+                    ),
+                    "split": split,
+                }
+            )
+        return loader(
+            dataset,
+            batch_size=self.batch_size,
+            shuffle=shuffle and sampler is None,
             sampler=sampler,
-            **self._loader_kwargs(),
+            drop_last=drop_last,
+            **kwargs,
         )
 
     def _loader_kwargs(self) -> dict[str, Any]:

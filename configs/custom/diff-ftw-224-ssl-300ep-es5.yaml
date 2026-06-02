@@ -67,6 +67,8 @@ data:
     data_dir: /mnt/s3_pretrain
     catalog: /mnt/s3_pretrain/catalog_train_validate_80_20.csv
     catalog_cache_dir: /home/ubuntu/working/ssl_catalog_cache
+    loader_startup_diagnostics: true
+    loader_startup_log_interval_seconds: 30
     split_column: usage
     img_path_cols: [image]
     crop_size: null
