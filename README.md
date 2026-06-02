@@ -89,6 +89,62 @@ The current large-scale experiment is configured in
 It is designed for approximately 30 million four-channel, 224 x 224 NICFI image
 chips and an AWS `p3` instance with eight GPUs.
 
+### Research foundations and design rationale
+
+This pipeline combines established ideas from several papers; it is not a
+verbatim implementation of a single published model. The diagrams in this
+README are project-authored summaries. The table below links to useful figures
+in the original papers rather than reproducing them.
+
+```mermaid
+flowchart TD
+    S["Sohl-Dickstein et al. 2015<br/>forward corruption and learned reverse process"] --> H["Ho et al. 2020<br/>DDPM noise-prediction training"]
+    H --> N["Nichol and Dhariwal 2021<br/>cosine noise schedule"]
+    H --> M["Hang et al. 2023<br/>Min-SNR-gamma weighting"]
+
+    U["Ronneberger et al. 2015<br/>U-Net multiscale denoiser"] --> P["NICFI diffusion<br/>pretraining pipeline"]
+    E["Tan and Le 2019<br/>EfficientNet encoder"] --> P
+    F["Perez et al. 2018<br/>FiLM feature conditioning"] --> P
+    H --> P
+    N --> P
+    M --> P
+
+    P --> X["EMA EfficientNet-B7 encoder export<br/>field-boundary segmentation"]
+```
+
+| Idea used here | Canonical source | Original paper visualization | How it is used in this pipeline |
+|----------------|------------------|------------------------------|---------------------------------|
+| Diffusion foundation | [Sohl-Dickstein et al. (2015)](https://arxiv.org/abs/1503.03585) | [Figure 1: corrupt and restore a distribution](https://arxiv.org/pdf/1503.03585#page=3) | Provides the conceptual foundation: gradually destroy image structure with noise and learn a denoising model. |
+| DDPM noise prediction | [Ho, Jain, and Abbeel (2020)](https://proceedings.neurips.cc/paper/2020/hash/4c5bcfec8584af0d967f1ab10179ca4b-Abstract.html) | [DDPM paper](https://papers.nips.cc/paper/2020/file/4c5bcfec8584af0d967f1ab10179ca4b-Paper.pdf) | Train on randomly sampled timesteps and predict the Gaussian noise added to each chip. |
+| Cosine noise schedule | [Nichol and Dhariwal (2021)](https://proceedings.mlr.press/v139/nichol21a.html) | [Figures 3 and 5: linear versus cosine schedules](https://proceedings.mlr.press/v139/nichol21a/nichol21a.pdf#page=4) | Use a 1,000-step cosine schedule with `s = 0.008` and `max_beta = 0.999`. |
+| Min-SNR weighting | [Hang et al. (2023)](https://arxiv.org/abs/2303.09556) | [Figures 1 and 2: convergence and timestep conflicts](https://arxiv.org/pdf/2303.09556#page=1) | Weight the noise-prediction loss with `gamma = 5.0` to reduce competition between timestep-specific denoising tasks. |
+| U-Net denoiser | [Ronneberger, Fischer, and Brox (2015)](https://arxiv.org/abs/1505.04597) | [Figure 1: contracting and expanding paths](https://arxiv.org/pdf/1505.04597#page=2) | Combine coarse semantic context with high-resolution skip features while predicting noise at the original image resolution. |
+| EfficientNet encoder | [Tan and Le (2019)](https://proceedings.mlr.press/v97/tan19a.html) | [Figure 2: compound scaling](https://proceedings.mlr.press/v97/tan19a/tan19a.pdf#page=2) | Preserve the downstream EfficientNet-B7 backbone so learned weights transfer directly into field-boundary segmentation. |
+| FiLM conditioning | [Perez et al. (2018)](https://arxiv.org/abs/1709.07871) | [Figure 2: feature-wise affine modulation](https://arxiv.org/pdf/1709.07871#page=2) | Adapt FiLM to inject the diffusion timestep into consumed encoder scales and decoder blocks without altering the EfficientNet architecture. |
+
+Centered inputs, EMA validation weights, timestep-binned validation metrics,
+and strict encoder-only export are training and evaluation conventions for this
+project. They are described below, but are not presented as novel paper
+contributions.
+
+The reasons for combining these methods for NICFI field-boundary pretraining
+are project-specific engineering judgments:
+
+- The approximately 30 million image chips do not require field-boundary
+  labels for denoising pretraining, so the full imagery corpus can contribute
+  to representation learning.
+- Field boundaries depend on both local edge detail and broader agricultural
+  texture. A U-Net exposes multiscale features while diffusion requires the
+  model to recover structure under many noise levels.
+- The downstream segmentation model already uses EfficientNet-B7. Keeping that
+  encoder unchanged makes encoder-only transfer strict and easy to audit.
+- A cosine schedule and Min-SNR weighting improve the distribution of training
+  signal across timesteps. This matters for a compute-intensive pretraining run
+  even though the cited papers did not study this exact remote-sensing dataset.
+- The goal is a useful encoder, not an image-generation product. The current
+  implementation therefore does not add learned reverse variances, a reverse
+  sampler, latent diffusion, or EDM-style continuous noise training.
+
 ### What the model learns
 
 Each training step starts with a clean image chip `x_0`, samples a random
