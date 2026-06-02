@@ -92,26 +92,11 @@ chips and an AWS `p3` instance with eight GPUs.
 ### Research foundations and design rationale
 
 This pipeline combines established ideas from several papers; it is not a
-verbatim implementation of a single published model. The diagrams in this
-README are project-authored summaries. The canonical figures displayed below
-are loaded from the arXiv paper-source renderer, attributed to their original
-papers, and linked back to those papers.
-
-```mermaid
-flowchart TD
-    S["Sohl-Dickstein et al. 2015<br/>forward corruption and learned reverse process"] --> H["Ho et al. 2020<br/>DDPM noise-prediction training"]
-    H --> N["Nichol and Dhariwal 2021<br/>cosine noise schedule"]
-    H --> M["Hang et al. 2023<br/>Min-SNR-gamma weighting"]
-
-    U["Ronneberger et al. 2015<br/>U-Net multiscale denoiser"] --> P["NICFI diffusion<br/>pretraining pipeline"]
-    E["Tan and Le 2019<br/>EfficientNet encoder"] --> P
-    F["Perez et al. 2018<br/>FiLM feature conditioning"] --> P
-    H --> P
-    N --> P
-    M --> P
-
-    P --> X["EMA EfficientNet-B7 encoder export<br/>field-boundary segmentation"]
-```
+verbatim implementation of a single published model. The canonical figures
+displayed below are loaded from the arXiv paper-source renderer, attributed to
+their original papers, and linked back to those papers. Plain-text workflow
+summaries later in this README describe how this repository combines the
+published methods.
 
 | Idea used here | Canonical source | Original paper visualization | How it is used in this pipeline |
 |----------------|------------------|------------------------------|---------------------------------|
@@ -253,16 +238,15 @@ diffusion timestep `t`, and adds a known amount of Gaussian noise. The model
 receives the noisy image `x_t` and the timestep, then predicts the noise that
 was added.
 
-```mermaid
-flowchart LR
-    A["NICFI image chip<br/>x_0: RGB-NIR, 224 x 224"] --> B["Center values<br/>[0, 1] to [-1, 1]"]
-    B --> C["Sample timestep<br/>t in [0, 999]"]
-    C --> D["Add Gaussian noise<br/>epsilon ~ N(0, I)"]
-    D --> E["Noisy chip<br/>x_t"]
-    E --> F["Timestep-conditioned<br/>EfficientNet-B7 U-Net"]
-    C --> F
-    F --> G["Predicted noise<br/>epsilon_theta(x_t, t)"]
-    G --> H["Min-SNR weighted<br/>noise-prediction loss"]
+```text
+NICFI chip x_0: RGB-NIR, 224 x 224
+  -> center values from [0, 1] to [-1, 1]
+  -> sample timestep t in [0, 999]
+  -> add Gaussian noise epsilon
+  -> noisy chip x_t
+  -> timestep-conditioned EfficientNet-B7 U-Net
+  -> predicted noise epsilon_theta(x_t, t)
+  -> Min-SNR weighted noise-prediction loss
 ```
 
 The forward diffusion equation is:
@@ -302,27 +286,17 @@ The timestep is converted into a sinusoidal embedding, passed through an MLP,
 and used to produce a scale and shift for every consumed encoder feature map
 and every decoder block.
 
-```mermaid
-flowchart LR
-    T["Diffusion timestep t"] --> S["Sinusoidal embedding<br/>128 dimensions"]
-    S --> M["Timestep MLP<br/>128 -> 512"]
+```text
+diffusion timestep t
+  -> sinusoidal embedding: 128 dimensions
+  -> timestep MLP: 128 -> 512
+  -> FiLM scale and shift for consumed encoder features and decoder blocks
 
-    X["Noisy image x_t"] --> E0["EfficientNet input feature<br/>left unchanged"]
-    E0 --> E1["Encoder feature E1"]
-    E1 --> E2["Encoder feature E2"]
-    E2 --> E3["Encoder feature E3+"]
-
-    E3 --> D3["Decoder block D3"]
-    D3 --> D2["Decoder block D2"]
-    D2 --> D1["Decoder block D1+"]
-    D1 --> O["Predicted 4-channel noise"]
-
-    M -.->|FiLM scale + shift| E1
-    M -.->|FiLM scale + shift| E2
-    M -.->|FiLM scale + shift| E3
-    M -.->|FiLM scale + shift| D3
-    M -.->|FiLM scale + shift| D2
-    M -.->|FiLM scale + shift| D1
+noisy image x_t
+  -> unchanged EfficientNet-B7 encoder
+  -> multiscale encoder feature maps with timestep FiLM
+  -> U-Net decoder blocks with timestep FiLM
+  -> predicted 4-channel noise
 ```
 
 The first raw input-like encoder feature is deliberately left unconditioned
@@ -394,13 +368,14 @@ EfficientNet encoder to:
 <default_root_dir>/encoder_ema.pt
 ```
 
-```mermaid
-flowchart LR
-    A["Online denoiser<br/>optimized with AdamW"] -->|"EMA update<br/>decay = 0.9999"| B["EMA denoiser"]
-    B --> C["EMA validation"]
-    B --> D["Export encoder_ema.pt"]
-    D --> E["Strict EfficientNet-B7<br/>encoder load"]
-    E --> F["Supervised field-boundary<br/>segmentation U-Net"]
+```text
+online denoiser optimized with AdamW
+  -> EMA update with decay = 0.9999
+  -> EMA denoiser
+  -> EMA validation
+  -> export encoder_ema.pt
+  -> strict EfficientNet-B7 encoder load
+  -> supervised field-boundary segmentation U-Net
 ```
 
 The export format is validated in
@@ -485,13 +460,13 @@ The large pretraining run reads many small image chips from mounted S3 storage.
 The current first-tier throughput settings are implemented in
 [`ftw_ma/ssl_datamodule.py`](ftw_ma/ssl_datamodule.py) and the experiment YAML:
 
-```mermaid
-flowchart LR
-    A["Mounted S3 bucket<br/>/mnt/s3_pretrain"] --> B["Persistent DataLoader workers<br/>4 per GPU rank"]
-    B --> C["Prefetch queue<br/>factor = 4"]
-    C --> D["Pinned host memory"]
-    D --> E["16-mixed precision"]
-    E --> F["8 CUDA devices<br/>DDP"]
+```text
+mounted S3 bucket: /mnt/s3_pretrain
+  -> persistent DataLoader workers: 4 per GPU rank
+  -> prefetch queue: factor = 4
+  -> pinned host memory
+  -> 16-mixed precision
+  -> 8 CUDA devices with DDP
 ```
 
 | Setting | Value | Reason |
