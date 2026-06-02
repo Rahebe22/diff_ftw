@@ -478,8 +478,8 @@ The current first-tier throughput settings are implemented in
 mounted S3 bucket: /mnt/s3_pretrain
   -> local memory-mapped catalog cache
   -> constant-memory distributed index shuffle
-  -> persistent DataLoader workers: 4 per GPU rank
-  -> prefetch queue: factor = 4
+  -> persistent DataLoader worker: 1 per GPU rank
+  -> prefetch queue: factor = 1
   -> pinned host memory
   -> 16-mixed precision
   -> 8 CUDA devices with DDP
@@ -490,9 +490,9 @@ mounted S3 bucket: /mnt/s3_pretrain
 | `devices` | `[0, 1, 2, 3, 4, 5, 6, 7]` | Use all eight GPUs |
 | `strategy` | `ddp_find_unused_parameters_false` | Avoid the DDP unused-parameter scan after verifying the graph |
 | `precision` | `16-mixed` | Reduce GPU memory use and increase tensor throughput |
-| `num_workers` | `4` per rank | Read chips concurrently |
+| `num_workers` | `1` per rank | Avoid overwhelming the mounted S3 filesystem during concurrent reads |
 | `persistent_workers` | Enabled automatically | Reuse worker processes between epochs |
-| `prefetch_factor` | `4` | Prepare upcoming batches |
+| `prefetch_factor` | `1` | Keep the S3 read queue bounded while preparing upcoming batches |
 | `pin_memory` | `true` | Improve host-to-GPU transfer |
 | `drop_last_train` | `true` | Keep distributed training batches regular |
 | `use_constant_memory_sampler` | `true` | Shuffle distributed indices without allocating a full 23-million-element permutation per rank |
