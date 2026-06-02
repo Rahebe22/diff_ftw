@@ -62,7 +62,7 @@ data:
     drop_last_train: true
     num_samples: -1
     data_dir: /mnt/s3_pretrain
-    catalog: /mnt/s3_pretrain/catalog_all.csv
+    catalog: /mnt/s3_pretrain/catalog_train_validate_80_20.csv
     split_column: usage
     img_path_cols: [image]
     crop_size: null
