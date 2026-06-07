@@ -64,9 +64,9 @@ data:
     prefetch_factor: 1
     drop_last_train: true
     num_samples: -1
-    data_dir: /mnt/s3_pretrain
-    catalog: /mnt/s3_pretrain/catalog_train_validate_80_20.csv
-    catalog_cache_dir: /home/ubuntu/working/ssl_catalog_cache
+    data_dir: /mnt/ebs_pretrain
+    catalog: /mnt/ebs_pretrain/catalog_train_validate_80_20.csv
+    catalog_cache_dir: /mnt/ebs_pretrain/ssl_catalog_cache
     loader_startup_diagnostics: true
     loader_startup_log_interval_seconds: 30
     split_column: usage
