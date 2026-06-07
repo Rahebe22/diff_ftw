@@ -68,13 +68,24 @@ def normalize_image(
             "Global statistics must be provided for global normalization."
         )
 
-    # Create a mask for nodata values and replace them with nan for computation.
-    # Also create a copy for normalization
-    img_tmp = np.where((img < 0) | np.isin(img, nodata), np.nan, img.astype(np.float64))
+    img = img.astype(np.float32)
+    nodata_values = [] if nodata is None else nodata
+    nodata_mask = (
+        np.isin(img, nodata_values)
+        if len(nodata_values) > 0
+        else np.zeros_like(img, dtype=bool)
+    )
+    invalid_mask = (~np.isfinite(img)) | (img < 0) | nodata_mask
+
+    # Replace invalid pixels with NaN for statistic computation. They are
+    # written back as zeros at the end so model inputs are always finite.
+    img_tmp = np.where(invalid_mask, np.nan, img.astype(np.float64))
     normal_img = img.astype(np.float32)
     
     # Create valid pixel mask for setting nodata pixels to 0 at the end
     valid_mask = ~np.isnan(img_tmp)
+    if not np.any(valid_mask):
+        return np.zeros_like(img, dtype=np.float32)
     # valid_pixels = np.sum(valid_mask)
     # total_pixels = img.size
     # valid_pct = (valid_pixels / total_pixels) * 100
@@ -92,8 +103,8 @@ def normalize_image(
                 # Only clip valid pixels
                 normal_img[b] = np.where(
                     valid_mask[b],
-                    np.clip(img[b], lower_percentiles[b], upper_percentiles[b]),
-                    img[b]
+                    np.clip(img_tmp[b], lower_percentiles[b], upper_percentiles[b]),
+                    0
                 )
 
         if procedure == "gpb":
@@ -105,7 +116,7 @@ def normalize_image(
             for b in range(img.shape[0]):
                 normal_img[b] = np.where(
                     valid_mask[b],
-                    np.clip((img[b] - gpb_mins[b]) / diff[b], 0, 1),
+                    np.clip((img_tmp[b] - gpb_mins[b]) / diff[b], 0, 1),
                     0
                 )
 
@@ -117,7 +128,7 @@ def normalize_image(
             # Only normalize valid pixels
             normal_img = np.where(
                 valid_mask,
-                np.clip((img - gab_min) / (gab_max - gab_min), 0, 1),
+                np.clip((img_tmp - gab_min) / (gab_max - gab_min), 0, 1),
                 0
             )
 
@@ -129,7 +140,7 @@ def normalize_image(
             # Only normalize valid pixels
             normal_img = np.where(
                 valid_mask,
-                np.clip((img - lab_min) / (lab_max - lab_min), 0, 1),
+                np.clip((img_tmp - lab_min) / (lab_max - lab_min), 0, 1),
                 0
             )
 
@@ -142,7 +153,7 @@ def normalize_image(
             for b in range(img.shape[0]):
                 normal_img[b] = np.where(
                     valid_mask[b],
-                    np.clip((img[b] - lpb_mins[b]) / diff[b], 0, 1),
+                    np.clip((img_tmp[b] - lpb_mins[b]) / diff[b], 0, 1),
                     0
                 )
 
@@ -155,7 +166,7 @@ def normalize_image(
             for b in range(img.shape[0]):
                 normal_img[b] = np.where(
                     valid_mask[b],
-                    (img[b] - gpb_means[b]) / gpb_stds[b],
+                    (img_tmp[b] - gpb_means[b]) / gpb_stds[b],
                     0
                 )
 
@@ -171,7 +182,7 @@ def normalize_image(
             # Only normalize valid pixels
             normal_img = np.where(
                 valid_mask,
-                (img - gab_mean) / gab_std,
+                (img_tmp - gab_mean) / gab_std,
                 0
             )
 
@@ -183,7 +194,7 @@ def normalize_image(
             for b in range(img.shape[0]):
                 normal_img[b] = np.where(
                     valid_mask[b],
-                    (img[b] - img_means[b]) / img_stds[b],
+                    (img_tmp[b] - img_means[b]) / img_stds[b],
                     0
                 )
 
@@ -195,12 +206,17 @@ def normalize_image(
             # Only normalize valid pixels
             normal_img = np.where(
                 valid_mask,
-                (img - img_mean) / img_std,
+                (img_tmp - img_mean) / img_std,
                 0
             )
 
-    # Ensure nodata pixels are set to 0 in the final output
-    normal_img = normal_img.astype(np.float32)
+    # Ensure invalid/nodata pixels and any numerical leftovers are finite.
+    normal_img = np.nan_to_num(
+        normal_img,
+        nan=0.0,
+        posinf=0.0,
+        neginf=0.0,
+    ).astype(np.float32)
     
     # print(f"  Set {np.sum(~valid_mask)} nodata pixels to 0.0")
     # print(f"  output range: [{normal_img.min():.2f}, {normal_img.max():.2f}]")
