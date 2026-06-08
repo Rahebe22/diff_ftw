@@ -79,311 +79,153 @@ Data classes based on those in `ftw-baselines` and `torchgeo` are used here, wit
 
 ## Diffusion self-supervised pretraining
 
-The diffusion pipeline pretrains an image encoder without requiring field
-boundary labels. It learns to remove synthetic Gaussian noise from satellite
-imagery, then exports the pretrained EfficientNet encoder for the supervised
-field-boundary mapping task.
+The diffusion pipeline pretrains an image encoder without requiring field-boundary labels. It learns a denoising task on unlabeled NICFI image chips, then exports the learned EfficientNet-B7 encoder for supervised field-boundary mapping.
 
-The current large-scale experiment is configured in
-[`configs/custom/diff-ftw-224-ssl-300ep-es5.yaml`](configs/custom/diff-ftw-224-ssl-300ep-es5.yaml).
-It is designed for approximately 30 million four-channel, 224 x 224 NICFI image
-chips and an AWS `p3` instance with eight GPUs.
+The large-scale experiment is configured in [`configs/custom/diff-ftw-224-ssl-300ep-es5.yaml`](configs/custom/diff-ftw-224-ssl-300ep-es5.yaml). The current AWS run uses approximately 29.3 million four-channel, 224 x 224 NICFI chips staged on EBS and trained with eight CUDA devices on an AWS P3 instance.
 
-### Research foundations and design rationale
+### Method at a glance
 
-This pipeline combines established ideas from several papers; it is not a
-verbatim implementation of a single published model. The canonical figures
-displayed below are loaded from the arXiv paper-source renderer, attributed to
-their original papers, and linked back to those papers. Plain-text workflow
-summaries later in this README describe how this repository combines the
-published methods.
+| Component | Current choice | Why it is used |
+|-----------|----------------|----------------|
+| Pretraining task | DDPM-style noise prediction | Uses unlabeled satellite imagery by asking the model to predict synthetic Gaussian noise added to each chip. |
+| Image encoder | EfficientNet-B7 | Matches the downstream FTW/Mapping Africa segmentation backbone, so encoder weights transfer directly. |
+| Denoiser | U-Net with EfficientNet-B7 encoder | Combines local boundary detail with multiscale agricultural texture. |
+| Timestep conditioning | FiLM layers on encoder features and decoder blocks | Gives the denoiser explicit information about the current noise level at multiple feature scales. |
+| Input scaling | Normalized to `[0, 1]`, then centered to `[-1, 1]` inside the diffusion task | Aligns image values with the zero-centered Gaussian noise process. |
+| Noise schedule | 1000-step cosine schedule | Preserves signal more smoothly across the noising trajectory than the original linear schedule. |
+| Loss | Min-SNR weighted MSE, `gamma = 5.0` | Reduces domination by very easy high-SNR timesteps. |
+| Validation weights | EMA model | Evaluates and exports smoother weights than the instantaneous online model. |
+| Transfer output | `encoder_ema.pt` | Strict encoder-only checkpoint used by the supervised field-boundary model. |
 
-| Idea used here | Canonical source | Original paper visualization | How it is used in this pipeline |
-|----------------|------------------|------------------------------|---------------------------------|
-| Diffusion foundation | [Sohl-Dickstein et al. (2015)](https://arxiv.org/abs/1503.03585) | [Figure 1: corrupt and restore a distribution](https://arxiv.org/pdf/1503.03585#page=3) | Provides the conceptual foundation: gradually destroy image structure with noise and learn a denoising model. |
-| DDPM noise prediction | [Ho, Jain, and Abbeel (2020)](https://proceedings.neurips.cc/paper/2020/hash/4c5bcfec8584af0d967f1ab10179ca4b-Abstract.html) | [DDPM paper](https://papers.nips.cc/paper/2020/file/4c5bcfec8584af0d967f1ab10179ca4b-Paper.pdf) | Train on randomly sampled timesteps and predict the Gaussian noise added to each chip. |
-| Cosine noise schedule | [Nichol and Dhariwal (2021)](https://proceedings.mlr.press/v139/nichol21a.html) | [Figures 3 and 5: linear versus cosine schedules](https://proceedings.mlr.press/v139/nichol21a/nichol21a.pdf#page=4) | Use a 1,000-step cosine schedule with `s = 0.008` and `max_beta = 0.999`. |
-| Min-SNR weighting | [Hang et al. (2023)](https://arxiv.org/abs/2303.09556) | [Figures 1 and 2: convergence and timestep conflicts](https://arxiv.org/pdf/2303.09556#page=1) | Weight the noise-prediction loss with `gamma = 5.0` to reduce competition between timestep-specific denoising tasks. |
-| U-Net denoiser | [Ronneberger, Fischer, and Brox (2015)](https://arxiv.org/abs/1505.04597) | [Figure 1: contracting and expanding paths](https://arxiv.org/pdf/1505.04597#page=2) | Combine coarse semantic context with high-resolution skip features while predicting noise at the original image resolution. |
-| EfficientNet encoder | [Tan and Le (2019)](https://proceedings.mlr.press/v97/tan19a.html) | [Figure 2: compound scaling](https://proceedings.mlr.press/v97/tan19a/tan19a.pdf#page=2) | Preserve the downstream EfficientNet-B7 backbone so learned weights transfer directly into field-boundary segmentation. |
-| FiLM conditioning | [Perez et al. (2018)](https://arxiv.org/abs/1709.07871) | [Figure 2: feature-wise affine modulation](https://arxiv.org/pdf/1709.07871#page=2) | Adapt FiLM to inject the diffusion timestep into consumed encoder scales and decoder blocks without altering the EfficientNet architecture. |
+### Canonical references
 
-#### Diffusion foundation
+This implementation combines established ideas; it is not a verbatim reimplementation of a single paper.
 
-<table>
-  <tr>
-    <td><img src="https://ar5iv.labs.arxiv.org/html/1503.03585/assets/x1.png" alt="Structured data distribution"></td>
-    <td>&rarr;</td>
-    <td><img src="https://ar5iv.labs.arxiv.org/html/1503.03585/assets/x2.png" alt="Partially noised data distribution"></td>
-    <td>&rarr;</td>
-    <td><img src="https://ar5iv.labs.arxiv.org/html/1503.03585/assets/x3.png" alt="Gaussian-noised data distribution"></td>
-    <td>Forward diffusion</td>
-  </tr>
-  <tr>
-    <td><img src="https://ar5iv.labs.arxiv.org/html/1503.03585/assets/x4.png" alt="Restored data distribution"></td>
-    <td>&larr;</td>
-    <td><img src="https://ar5iv.labs.arxiv.org/html/1503.03585/assets/x5.png" alt="Partially restored data distribution"></td>
-    <td>&larr;</td>
-    <td><img src="https://ar5iv.labs.arxiv.org/html/1503.03585/assets/x6.png" alt="Gaussian distribution before restoration"></td>
-    <td>Learned reverse process</td>
-  </tr>
-</table>
+| Idea used here | Reference | Authors | Model or method | Year | How it appears in this repo |
+|----------------|-----------|---------|-----------------|------|-----------------------------|
+| Diffusion modeling foundation | [Deep Unsupervised Learning using Nonequilibrium Thermodynamics](https://arxiv.org/abs/1503.03585) | Sohl-Dickstein, Weiss, Maheswaranathan, Ganguli | Diffusion probabilistic modeling | 2015 | Conceptual forward corruption and learned reverse denoising process. |
+| DDPM noise prediction | [Denoising Diffusion Probabilistic Models](https://proceedings.neurips.cc/paper/2020/hash/4c5bcfec8584af0d967f1ab10179ca4b-Abstract.html) | Ho, Jain, Abbeel | DDPM | 2020 | Random timestep sampling and MSE prediction of the Gaussian noise. |
+| Cosine schedule | [Improved Denoising Diffusion Probabilistic Models](https://proceedings.mlr.press/v139/nichol21a.html) | Nichol, Dhariwal | Improved DDPM | 2021 | 1000-step cosine beta schedule with `cosine_s = 0.008`. |
+| Min-SNR loss weighting | [Efficient Diffusion Training via Min-SNR Weighting Strategy](https://arxiv.org/abs/2303.09556) | Hang et al. | Min-SNR-g weighting | 2023 | Timestep loss weights with `gamma = 5.0`. |
+| Multiscale denoiser | [U-Net: Convolutional Networks for Biomedical Image Segmentation](https://arxiv.org/abs/1505.04597) | Ronneberger, Fischer, Brox | U-Net | 2015 | Encoder-decoder denoiser with skip-connected multiscale features. |
+| Encoder backbone | [EfficientNet: Rethinking Model Scaling for Convolutional Neural Networks](https://proceedings.mlr.press/v97/tan19a.html) | Tan, Le | EfficientNet | 2019 | EfficientNet-B7 encoder retained for downstream segmentation transfer. |
+| Feature-wise timestep conditioning | [FiLM: Visual Reasoning with a General Conditioning Layer](https://arxiv.org/abs/1709.07871) | Perez et al. | FiLM | 2018 | Timestep embedding produces feature-wise scale and shift values. |
+| AWS P3 hardware | [Amazon EC2 P3 Instances](https://aws.amazon.com/about-aws/whats-new/2017/10/introducing-amazon-ec2-p3-instances/) | AWS | P3 / p3.16xlarge | 2017 | Eight NVIDIA Tesla V100 GPUs used for the large run. |
 
-**[Sohl-Dickstein et al. (2015), Figure 1](https://arxiv.org/pdf/1503.03585#page=3).**
-The original diffusion-model paper illustrates a structured data distribution
-being gradually corrupted into a Gaussian distribution, then restored by a
-learned reverse process. This project trains the denoising representation but
-does not currently implement reverse-process image sampling.
+### Input and output
 
-#### Forward noising and the cosine schedule
-
-<table>
-  <tr>
-    <td width="50%">
-      <a href="https://proceedings.mlr.press/v139/nichol21a/nichol21a.pdf#page=4">
-        <img src="https://ar5iv.labs.arxiv.org/html/2102.09672/assets/linear_vs_cosine.png" alt="Linear and cosine forward noising schedules from Improved DDPM Figure 3">
-      </a>
-    </td>
-    <td width="50%">
-      <a href="https://proceedings.mlr.press/v139/nichol21a/nichol21a.pdf#page=4">
-        <img src="https://ar5iv.labs.arxiv.org/html/2102.09672/assets/x4.png" alt="Alpha-bar values for linear and cosine schedules from Improved DDPM Figure 5">
-      </a>
-    </td>
-  </tr>
-  <tr>
-    <td><strong>Nichol and Dhariwal (2021), Figure 3.</strong> The linear schedule destroys image information earlier; the cosine schedule adds noise more gradually.</td>
-    <td><strong>Nichol and Dhariwal (2021), Figure 5.</strong> The cosine schedule preserves signal for more of the diffusion trajectory. This pipeline uses that 1,000-step cosine schedule.</td>
-  </tr>
-</table>
-
-#### Min-SNR loss weighting
-
-<p align="center">
-  <a href="https://arxiv.org/pdf/2303.09556#page=1">
-    <img src="https://ar5iv.labs.arxiv.org/html/2303.09556/assets/x1.png" alt="Min-SNR convergence speedup from Hang et al. Figure 1" width="540">
-  </a>
-</p>
-
-**Hang et al. (2023), Figure 1.** Min-SNR weighting was introduced to reduce
-conflicting optimization directions across noise timesteps. Their reported
-experiment converges `3.4x` faster than the baseline. This pipeline uses the
-paper's established default `gamma = 5.0`.
-
-#### U-Net denoiser
-
-<p align="center">
-  <a href="https://arxiv.org/pdf/1505.04597#page=2">
-    <img src="https://ar5iv.labs.arxiv.org/html/1505.04597/assets/x1.png" alt="Original U-Net architecture from Ronneberger et al. Figure 1" width="760">
-  </a>
-</p>
-
-**Ronneberger, Fischer, and Brox (2015), Figure 1.** The contracting path
-captures context; the expanding path combines that context with copied
-high-resolution features. The diffusion denoiser uses this multiscale pattern
-to predict noise at the original chip resolution.
-
-#### Timestep conditioning with FiLM
-
-<p align="center">
-  <a href="https://arxiv.org/pdf/1709.07871#page=2">
-    <img src="https://ar5iv.labs.arxiv.org/html/1709.07871/assets/FiLM.png" alt="Feature-wise linear modulation from Perez et al. Figure 2" width="230">
-  </a>
-</p>
-
-**Perez et al. (2018), Figure 2.** FiLM applies a feature-wise scale
-`gamma` and shift `beta`. This pipeline adapts that conditioning mechanism:
-the diffusion timestep generates a scale and shift for consumed EfficientNet
-feature maps and U-Net decoder blocks.
-
-#### EfficientNet encoder
-
-<p align="center">
-  <a href="https://proceedings.mlr.press/v97/tan19a/tan19a.pdf#page=2">
-    <img src="https://ar5iv.labs.arxiv.org/html/1905.11946/assets/x2.png" alt="EfficientNet compound scaling from Tan and Le Figure 2" width="760">
-  </a>
-</p>
-
-**Tan and Le (2019), Figure 2.** EfficientNet balances network width, depth,
-and resolution through compound scaling. This project preserves the
-EfficientNet-B7 encoder architecture so its pretrained weights can transfer
-strictly into the downstream field-boundary model.
-
-Centered inputs, EMA validation weights, timestep-binned validation metrics,
-and strict encoder-only export are training and evaluation conventions for this
-project. They are described below, but are not presented as novel paper
-contributions.
-
-The reasons for combining these methods for NICFI field-boundary pretraining
-are project-specific engineering judgments:
-
-- The approximately 30 million image chips do not require field-boundary
-  labels for denoising pretraining, so the full imagery corpus can contribute
-  to representation learning.
-- Field boundaries depend on both local edge detail and broader agricultural
-  texture. A U-Net exposes multiscale features while diffusion requires the
-  model to recover structure under many noise levels.
-- The downstream segmentation model already uses EfficientNet-B7. Keeping that
-  encoder unchanged makes encoder-only transfer strict and easy to audit.
-- A cosine schedule and Min-SNR weighting improve the distribution of training
-  signal across timesteps. This matters for a compute-intensive pretraining run
-  even though the cited papers did not study this exact remote-sensing dataset.
-- The goal is a useful encoder, not an image-generation product. The current
-  implementation therefore does not add learned reverse variances, a reverse
-  sampler, latent diffusion, or EDM-style continuous noise training.
-
-### What the model learns
-
-Each training step starts with a clean image chip `x_0`, samples a random
-diffusion timestep `t`, and adds a known amount of Gaussian noise. The model
-receives the noisy image `x_t` and the timestep, then predicts the noise that
-was added.
+The SSL dataset reads image-only chips from a CSV catalog. Each row points to one raster image.
 
 ```text
-NICFI chip x_0: RGB-NIR, 224 x 224
-  -> center values from [0, 1] to [-1, 1]
-  -> sample timestep t in [0, 999]
-  -> add Gaussian noise epsilon
-  -> noisy chip x_t
-  -> timestep-conditioned EfficientNet-B7 U-Net
-  -> predicted noise epsilon_theta(x_t, t)
-  -> Min-SNR weighted noise-prediction loss
+input image on disk
+  -> GeoTIFF / COG chip
+  -> 4 channels: RGB-NIR
+  -> 224 x 224 pixels
+  -> no boundary label required
 ```
 
-The forward diffusion equation is:
+The data module normalizes imagery to finite `[0, 1]` tensors. Invalid pixels, negative values, infinities, and configured nodata values are ignored during normalization statistics and written back as finite zeros. The diffusion task then centers the batch to `[-1, 1]` before adding noise.
+
+```text
+DataLoader output:     image in [0, 1]
+Diffusion task input:  x_0 = 2 * image - 1, so x_0 is in [-1, 1]
+Training target:       sampled Gaussian noise epsilon
+Model output:          predicted 4-channel noise epsilon_theta(x_t, t)
+Final artifact:        EMA EfficientNet-B7 encoder checkpoint
+```
+
+The useful training artifact is:
+
+```text
+/home/ubuntu/working/models/diffusion_ssl_300ep_es5/encoder_ema.pt
+```
+
+That file contains only the EMA EfficientNet encoder state dictionary and is intended for supervised field-boundary segmentation fine-tuning.
+
+### Diffusion objective
+
+For each batch, the task samples a timestep `t`, samples Gaussian noise `epsilon`, and creates a noisy image `x_t`:
 
 ```text
 x_t = sqrt(alpha_bar_t) * x_0 + sqrt(1 - alpha_bar_t) * epsilon
 ```
 
-where `epsilon` is sampled Gaussian noise and `alpha_bar_t` comes from the
-configured noise schedule. The model minimizes:
+The model receives `(x_t, t)` and predicts `epsilon`:
 
 ```text
 loss_i = weight_t * mean((epsilon - epsilon_theta(x_t, t))^2)
 ```
 
-This is a denoising pretraining objective. The pipeline is not currently used
-as an image generator: its useful output is the learned encoder.
-
-### Model architecture
-
-The denoiser is implemented in
-[`ftw_ma/diffusion_task.py`](ftw_ma/diffusion_task.py) as
-`FTWEfficientNetDiffusionModel`. It wraps a
-[`segmentation_models_pytorch`](https://github.com/qubvel-org/segmentation_models.pytorch)
-U-Net with an EfficientNet-B7 encoder.
-
-The EfficientNet encoder architecture is intentionally kept unchanged so its
-weights can transfer directly into the downstream segmentation U-Net. The
-diffusion-specific capability is added around its feature maps through
-timestep-conditioned FiLM layers:
-
-```text
-FiLM(feature, t) = feature * (1 + scale(t)) + shift(t)
-```
-
-The timestep is converted into a sinusoidal embedding, passed through an MLP,
-and used to produce a scale and shift for every consumed encoder feature map
-and every decoder block.
-
-```text
-diffusion timestep t
-  -> sinusoidal embedding: 128 dimensions
-  -> timestep MLP: 128 -> 512
-  -> FiLM scale and shift for consumed encoder features and decoder blocks
-
-noisy image x_t
-  -> unchanged EfficientNet-B7 encoder
-  -> multiscale encoder feature maps with timestep FiLM
-  -> U-Net decoder blocks with timestep FiLM
-  -> predicted 4-channel noise
-```
-
-The first raw input-like encoder feature is deliberately left unconditioned
-because the SMP U-Net decoder does not consume it. Creating a trainable FiLM
-layer for that discarded feature would leave unused parameters in the DDP
-graph.
-
-SMP also retains the EfficientNet `_conv_head` and `_bn1` classification-tail
-layers in the encoder state dictionary, although its U-Net feature-pyramid
-forward path does not execute them. They remain present for strict downstream
-encoder transfer, but are frozen during diffusion pretraining so DDP does not
-track inert trainable parameters.
-
-The default configuration uses:
-
-| Setting | Value | Purpose |
-|---------|-------|---------|
-| Input channels | `4` | NICFI RGB-NIR imagery |
-| Backbone | `efficientnet-b7` | Encoder transferred to field-boundary mapping |
-| Denoiser | SMP U-Net | Predicts noise at the original image resolution |
-| Diffusion steps | `1000` | Standard discrete diffusion horizon |
-| Timestep embedding | `128` dimensions | Sinusoidal representation of `t` |
-| Timestep MLP | `512` dimensions | Shared conditioning signal for FiLM layers |
-| Noise-prediction loss | MSE | Compares predicted and sampled Gaussian noise |
-
-### Noise schedule and Min-SNR weighting
-
-The scheduler is implemented in
-[`diffusion/scheduler.py`](diffusion/scheduler.py). The current run uses a
-1000-step IDDPM-style cosine schedule:
-
-```text
-noise_schedule: cosine
-cosine_s: 0.008
-max_beta: 0.999
-```
-
-A cosine schedule moves from a nearly clean image to nearly pure noise while
-avoiding an overly abrupt corruption path. Inputs are centered from `[0, 1]`
-to `[-1, 1]` before noise is added so the image distribution is aligned with
-the zero-centered Gaussian noise process.
-
-The loss also uses Min-SNR weighting with `gamma = 5.0`:
+With Min-SNR weighting:
 
 ```text
 SNR_t    = alpha_bar_t / (1 - alpha_bar_t)
 weight_t = min(SNR_t, gamma) / SNR_t
 ```
 
-This prevents easy, very high-SNR examples from dominating the objective while
-preserving the harder denoising steps.
+The current run uses `gamma = 5.0`. This makes the loss less dominated by nearly clean, high-SNR timesteps and gives the model a more balanced denoising curriculum across the 1000-step schedule.
 
-### EMA weights, validation, and transfer
+This repository currently uses a discrete DDPM-style objective. It does not currently implement EDM continuous noise sampling, latent diffusion, learned reverse variance, or a full reverse sampler for image generation. The purpose here is representation learning for boundary mapping, not producing synthetic satellite images.
 
-Training maintains two copies of the denoiser:
+### Model architecture
 
-1. The online model is updated by AdamW.
-2. The exponential moving average (EMA) model is updated after optimizer steps.
+The diffusion model is implemented in [`ftw_ma/diffusion_task.py`](ftw_ma/diffusion_task.py) as `FTWEfficientNetDiffusionModel`.
 
 ```text
-theta_ema = decay * theta_ema + (1 - decay) * theta_online
+noisy 4-channel chip x_t
+  -> unchanged EfficientNet-B7 encoder
+  -> multiscale encoder feature maps
+  -> timestep FiLM on consumed encoder scales
+  -> U-Net decoder with timestep FiLM on decoder blocks
+  -> 4-channel predicted noise
 ```
 
-The default EMA decay is `0.9999`. Validation uses the smoother EMA model by
-default. At the end of training, the pipeline exports only the EMA
-EfficientNet encoder to:
+The underlying U-Net is created with [`segmentation_models_pytorch`](https://github.com/qubvel-org/segmentation_models.pytorch):
 
 ```text
-<default_root_dir>/encoder_ema.pt
+encoder_name: efficientnet-b7
+encoder_weights: imagenet
+in_channels: 4
+classes: 4
 ```
+
+The EfficientNet-B7 encoder architecture is intentionally left untouched. The diffusion-specific information is added through FiLM conditioning around the U-Net feature maps, not by changing the encoder blocks themselves.
+
+FiLM applies a feature-wise scale and shift:
 
 ```text
-online denoiser optimized with AdamW
-  -> EMA update with decay = 0.9999
-  -> EMA denoiser
-  -> EMA validation
-  -> export encoder_ema.pt
-  -> strict EfficientNet-B7 encoder load
-  -> supervised field-boundary segmentation U-Net
+FiLM(feature, t) = feature * (1 + scale(t)) + shift(t)
 ```
 
-The export format is validated in
-[`ftw_ma/checkpoints.py`](ftw_ma/checkpoints.py). The downstream trainer loads
-the encoder with `strict=True`, which catches architecture or tensor-shape
-mismatches instead of silently dropping weights.
+The timestep path is:
 
-To transfer the pretrained encoder into field-boundary segmentation:
+```text
+timestep t
+  -> sinusoidal timestep embedding, 128 dimensions
+  -> MLP, 128 -> 512
+  -> FiLM scale and shift parameters
+```
+
+The first raw input-like encoder feature is left unconditioned because the SMP U-Net decoder does not consume it. SMP also keeps EfficientNet classification-tail layers in the encoder object, but those layers are not executed in the U-Net feature path; they are frozen during diffusion pretraining to avoid unused trainable parameters in DDP.
+
+### EMA validation and encoder export
+
+Training maintains two model copies:
+
+```text
+online model: updated by AdamW
+EMA model:    theta_ema = decay * theta_ema + (1 - decay) * theta_online
+```
+
+The default EMA decay is `0.9999`. Validation uses the EMA model, and training end exports the EMA encoder.
+
+Validation reports:
+
+- `val/loss`: EMA denoising loss used by checkpointing and early stopping.
+- `val/loss_t_0000_0099` through `val/loss_t_0900_0999`: timestep-binned validation loss.
+- Best-sample diagnostics under `<default_root_dir>/best_samples`: clean image, noisy image, true noise, predicted noise, and reconstructed image.
+
+The encoder export is validated by [`ftw_ma/checkpoints.py`](ftw_ma/checkpoints.py). Downstream supervised training should load it strictly so architecture or tensor-shape mismatches fail loudly.
 
 ```yaml
 model:
@@ -391,48 +233,26 @@ model:
     model: unet
     backbone: efficientnet-b7
     in_channels: 4
-    weights: /path/to/encoder_ema.pt
+    weights: /home/ubuntu/working/models/diffusion_ssl_300ep_es5/encoder_ema.pt
 ```
 
-Validation reports:
-
-- `val/loss`: the EMA denoising loss used by checkpointing and early stopping.
-- `val/loss_t_0000_0099` through `val/loss_t_0900_0999`: loss across ten
-  timestep bins, which reveals where the model still struggles.
-- Diagnostic images for the best validation sample in each epoch: clean input,
-  noisy input, true noise, predicted noise, and reconstruction.
-
 ### What changed from the first diffusion baseline
-
-The first version was a useful starting point, but it supplied timestep context
-only once as an input-channel bias. The current version strengthens the
-diffusion mechanics while preserving the downstream encoder.
 
 | Area | First baseline | Current pipeline |
 |------|----------------|------------------|
 | Encoder | EfficientNet-B7 | EfficientNet-B7, unchanged |
-| Timestep context | Added once at the image input | FiLM conditioning at consumed encoder scales and decoder blocks |
-| Input range | `[0, 1]` | Centered to `[-1, 1]` |
-| Noise schedule | `10,000` linear steps | `1,000` IDDPM-style cosine steps |
-| Loss | Uniform noise-prediction MSE | Min-SNR weighted MSE with `gamma = 5.0` |
+| Timestep context | Added once near the image input | FiLM conditioning at consumed encoder scales and decoder blocks |
+| Input range | `[0, 1]` | DataLoader returns `[0, 1]`; diffusion task centers to `[-1, 1]` |
+| Noise schedule | Long linear schedule | 1000-step IDDPM-style cosine schedule |
+| Loss | Uniform MSE | Min-SNR weighted MSE with `gamma = 5.0` |
 | Validation model | Online weights | EMA weights |
-| Validation detail | Aggregate loss | Aggregate loss plus ten timestep bins |
-| Transfer artifact | Full training checkpoint focus | Strict EMA encoder export |
-| AWS configuration | Two GPUs | Eight GPUs, AMP, and loader throughput controls |
+| Validation detail | Aggregate loss | Aggregate loss plus ten timestep bins and image diagnostics |
+| Transfer artifact | Full checkpoint emphasis | Strict EMA encoder-only export |
+| Data path | Mounted S3 | Full large run staged on EBS for faster small-file reads |
 
-### Pretraining data catalog
+### Pretraining data
 
-The current AWS configuration expects:
-
-```text
-data_dir: /mnt/s3_pretrain
-catalog:  /mnt/s3_pretrain/catalog_train_validate_80_20.csv
-catalog_cache_dir: /home/ubuntu/working/ssl_catalog_cache
-```
-
-The catalog contains a `usage` column with `train` and `validate` values. The
-current temporary split is a reproducible random 80/20 division of the
-29,258,844-chip catalog:
+The full pretraining catalog contains 29,258,844 NICFI image chips. The current training catalog uses a reproducible 80/20 split in the `usage` column:
 
 | Split | Chips |
 |-------|------:|
@@ -440,141 +260,165 @@ current temporary split is a reproducible random 80/20 division of the
 | Validate | 5,850,538 |
 | Total | 29,258,844 |
 
-The large random validation split is useful for bringing up the pipeline and
-measuring denoising behavior. For a final scientific comparison, prefer a
-geography-aware holdout when tile or region metadata is available: neighboring
-satellite chips can otherwise place very similar imagery in both splits.
+The current AWS full-run config expects the copied EBS dataset:
 
-The generated catalog is a data artifact and should not be committed to Git.
-Upload it to the mounted bucket so it appears at the configured
-`/mnt/s3_pretrain/catalog_train_validate_80_20.csv` path on the AWS instance.
+```text
+data_dir:          /mnt/ebs_pretrain
+catalog:           /mnt/ebs_pretrain/catalog_train_validate_80_20.csv
+catalog_cache_dir: /mnt/ebs_pretrain/ssl_catalog_cache
+```
 
-Before the first full run on an AWS instance, build a compact catalog cache on
-local instance storage:
+The mounted S3 dataset at `/mnt/s3_pretrain` is useful as the source of truth, but it was too slow for sustained random small-file training. The large run stages the imagery on a 10,000 GiB gp3 EBS volume mounted at `/mnt/ebs_pretrain`. In the EBS smoke and benchmark runs, first-image reads were about `0.04s`, and first validation batches were ready in about `0.33s`.
+
+Build the local catalog cache once before the full run:
 
 ```bash
 python scripts/build_ssl_catalog_cache.py \
-  --catalog /mnt/s3_pretrain/catalog_train_validate_80_20.csv \
-  --output-dir /home/ubuntu/working/ssl_catalog_cache
+  --catalog /mnt/ebs_pretrain/catalog_train_validate_80_20.csv \
+  --output-dir /mnt/ebs_pretrain/ssl_catalog_cache
 ```
 
-This is a one-time sequential scan of the CSV. It does not copy the imagery.
-It writes compact path and offset files that can be memory-mapped by every DDP
-rank instead of repeatedly expanding millions of paths into Python objects.
+This cache avoids repeatedly expanding tens of millions of paths into Python objects across DDP ranks.
 
-Validating all 5,850,538 holdout chips after every epoch is also expensive. The
-full-run configuration uses a stable distributed subset of `200` validation
-batches per rank. Before a final scientific comparison, choose the validation
-policy intentionally: use a larger stable subset, scan the complete holdout, or
-replace the temporary split with a smaller geography-aware holdout.
+### GPU and runtime environment
 
-### AWS data loading and DDP
+The large diffusion experiment has been run on an AWS P3 eight-GPU instance. AWS lists the `p3.16xlarge` configuration as eight NVIDIA Tesla V100 GPUs, 64 vCPUs, 488 GiB memory, 25 Gbps network bandwidth, and 14 Gbps EBS bandwidth.
 
-The large pretraining run reads many small image chips from mounted S3 storage.
-The current first-tier throughput settings are implemented in
-[`ftw_ma/ssl_datamodule.py`](ftw_ma/ssl_datamodule.py) and the experiment YAML:
+The full YAML is configured for:
 
 ```text
-mounted S3 bucket: /mnt/s3_pretrain
-  -> local memory-mapped catalog cache
-  -> constant-memory distributed index shuffle
-  -> persistent DataLoader worker: 1 per GPU rank
-  -> prefetch queue: factor = 1
-  -> pinned host memory
-  -> 16-mixed precision
-  -> 8 CUDA devices with DDP
+accelerator: cuda
+devices: [0, 1, 2, 3, 4, 5, 6, 7]
+strategy: ddp_find_unused_parameters_false
+use_distributed_sampler: false
+batch_size: 20 per rank
+num_workers: 1 per rank
+prefetch_factor: 1
+pin_memory: true
 ```
 
-| Setting | Value | Reason |
-|---------|-------|--------|
-| `devices` | `[0, 1, 2, 3, 4, 5, 6, 7]` | Use all eight GPUs |
-| `strategy` | `ddp_find_unused_parameters_false` | Avoid the DDP unused-parameter scan after verifying the graph |
-| `precision` | `16-mixed` | Reduce GPU memory use and increase tensor throughput |
-| `num_workers` | `1` per rank | Avoid overwhelming the mounted S3 filesystem during concurrent reads |
-| `persistent_workers` | Enabled automatically | Reuse worker processes between epochs |
-| `prefetch_factor` | `1` | Keep the S3 read queue bounded while preparing upcoming batches |
-| `pin_memory` | `true` | Improve host-to-GPU transfer |
-| `drop_last_train` | `true` | Keep distributed training batches regular |
-| `use_constant_memory_sampler` | `true` | Shuffle distributed indices without allocating a full 23-million-element permutation per rank |
+Measured safe-run checkpoints from the AWS/EBS setup:
 
-The diffusion AWS configs also enable `loader_startup_diagnostics`. During the
-first lazy S3 batch read, each DDP rank reports when it begins waiting and when
-its first batch becomes available. Rank zero prints a heartbeat every `30`
-seconds while it is still waiting, and each worker reports its first image-read
-time once. Later batches remain quiet so the diagnostics do not add meaningful
-training overhead.
+| Run | Setting | Observed result |
+|-----|---------|-----------------|
+| Short benchmark | 2000 train batches, 20 validation batches | 11 min 48 sec, about 2.84 it/s, `train/loss = 0.335`, `val/loss = 0.989` |
+| Longer benchmark | 20000 train batches | 1 hr 56 min, about 2.90 it/s, `train/loss = 0.124`, `val/loss = 1.094` |
+| Full epoch | 146,301 optimizer steps over the full train split | 14 hr 12 min, about 2.82 it/s, `train/loss = 0.054`, `val/loss = 0.462` |
 
-For multi-GPU pretraining, use
-[`run_lightning_fit.py`](run_lightning_fit.py). This standalone Lightning
-launcher ensures that every DDP child process relaunches the same valid command.
-It also applies GDAL environment settings that reduce unnecessary remote
-directory reads and increase the VSI cache.
+The stable full-epoch run used safer runtime overrides than the YAML defaults:
 
-The S3 mount may still remain the limiting factor. Measure throughput with a
-short benchmark before starting a full run. If GPU utilization stays low,
-stage image shards on local NVMe or EBS and compare images per second.
+```text
+precision: 32-true
+learning rate: 5e-5
+gradient_clip_val: 1.0
+```
 
-### Running diffusion pretraining
+These overrides were used after an earlier full-epoch attempt with mixed precision and `lr = 2e-4` produced NaN losses. The normalizer and dataloader checks showed finite image batches, so the safer run treats this as an optimization-stability issue rather than a confirmed data-corruption issue.
 
-First run the tiny eight-GPU smoke test:
+### How to run on AWS
+
+Activate the environment and install the repo in editable mode:
+
+```bash
+cd /home/ubuntu/diff_ftw
+source /home/ubuntu/venvs/ftw_ma312/bin/activate
+pip install -e .
+```
+
+Confirm the EBS data path exists:
+
+```bash
+df -h /mnt/ebs_pretrain
+ls /mnt/ebs_pretrain/catalog_train_validate_80_20.csv
+ls /mnt/ebs_pretrain/ssl_catalog_cache
+```
+
+Run the tiny smoke test first. The smoke YAML intentionally uses the tiny
+repo smoke catalog and may still point at `/mnt/s3_pretrain`; it is for DDP
+and model-graph debugging, while the full run below uses EBS.
 
 ```bash
 python run_lightning_fit.py fit \
-  -c configs/custom/diff-ftw-smoke.yaml
+  -c configs/custom/diff-ftw-smoke.yaml \
+  --trainer.precision=32-true \
+  --trainer.gradient_clip_val=1.0 \
+  --model.lr=5e-5
 ```
 
-The smoke configuration uses the same EfficientNet-B7 denoiser and DDP strategy
-as the full run, but reads only 32 training chips and 16 validation chips from
-[`configs/custom/diff-ftw-smoke-catalog.csv`](configs/custom/diff-ftw-smoke-catalog.csv).
-This avoids repeatedly scanning the 29-million-row catalog while debugging
-startup and distributed-training errors. On the first backward pass, the task
-also reports whether any online model parameters failed to receive gradients.
-
-After the smoke test completes, run a short eight-GPU throughput benchmark with
-the full catalog:
+Run a short full-catalog benchmark:
 
 ```bash
 python run_lightning_fit.py fit \
   -c configs/custom/diff-ftw-224-ssl-300ep-es5.yaml \
-  --trainer.limit_train_batches=1000 \
+  --trainer.limit_train_batches=2000 \
   --trainer.limit_val_batches=20 \
-  --trainer.max_epochs=1
+  --trainer.max_epochs=1 \
+  --trainer.precision=32-true \
+  --trainer.gradient_clip_val=1.0 \
+  --model.lr=5e-5
 ```
 
-A healthy benchmark should:
-
-- Initialize all eight DDP ranks.
-- Report a first-batch value range close to `(-1.0000, 1.0000)`.
-- Select non-zero `train` and `validate` sample counts.
-- Advance beyond batch `0`.
-- Report stable loss values while GPU utilization is monitored.
-
-After the benchmark passes, start the full configured run:
+Start the 300-epoch run in `tmux` so it survives disconnection:
 
 ```bash
+tmux new -s diffusion300_ebs
+
 python run_lightning_fit.py fit \
-  -c configs/custom/diff-ftw-224-ssl-300ep-es5.yaml
+  -c configs/custom/diff-ftw-224-ssl-300ep-es5.yaml \
+  --trainer.precision=32-true \
+  --trainer.gradient_clip_val=1.0 \
+  --model.lr=5e-5
 ```
 
-To resume diffusion pretraining:
+Detach from `tmux` with `Ctrl-b`, then `d`. Reattach later with:
+
+```bash
+tmux attach -t diffusion300_ebs
+```
+
+Resume from a checkpoint:
 
 ```bash
 python run_lightning_fit.py fit \
   -c configs/custom/diff-ftw-224-ssl-300ep-es5.yaml \
-  --ckpt_path /path/to/checkpoint.ckpt
+  --trainer.precision=32-true \
+  --trainer.gradient_clip_val=1.0 \
+  --model.lr=5e-5 \
+  --ckpt_path /home/ubuntu/working/models/diffusion_ssl_300ep_es5/lightning_logs/version_X/checkpoints/last.ckpt
 ```
+
+### Expected outputs
+
+The full run writes under:
+
+```text
+/home/ubuntu/working/models/diffusion_ssl_300ep_es5
+```
+
+Important outputs are:
+
+| Output | Meaning |
+|--------|---------|
+| `encoder_ema.pt` | EMA EfficientNet-B7 encoder for supervised transfer |
+| `last.ckpt` | Resume checkpoint |
+| best `epoch-*.ckpt` | Best checkpoint by `val_loss` |
+| `best_samples/*.png` | Validation diagnostic images |
+| Lightning logs | Training loss, validation loss, Min-SNR weights, timestep-binned losses |
 
 ### Relevant diffusion files
 
 | File | Role |
 |------|------|
-| [`ftw_ma/diffusion_task.py`](ftw_ma/diffusion_task.py) | Denoiser, FiLM conditioning, weighted training objective, EMA validation, diagnostics, and encoder export |
+| [`ftw_ma/diffusion_task.py`](ftw_ma/diffusion_task.py) | Denoiser, FiLM conditioning, weighted objective, EMA validation, diagnostics, and encoder export |
 | [`diffusion/scheduler.py`](diffusion/scheduler.py) | Cosine schedule, forward noising process, timestep embeddings, SNR calculation, and Min-SNR weights |
-| [`ftw_ma/ssl_datamodule.py`](ftw_ma/ssl_datamodule.py) | Image-only SSL dataset and DataLoader throughput settings |
-| [`scripts/build_ssl_catalog_cache.py`](scripts/build_ssl_catalog_cache.py) | One-time local memory-mapped path-cache builder for the large SSL catalog |
+| [`ftw_ma/normalize.py`](ftw_ma/normalize.py) | Finite image normalization and nodata handling |
+| [`ftw_ma/ssl_datamodule.py`](ftw_ma/ssl_datamodule.py) | Image-only SSL dataset, memory-mapped catalog cache, constant-memory sampler, and loader diagnostics |
+| [`scripts/build_ssl_catalog_cache.py`](scripts/build_ssl_catalog_cache.py) | One-time path-cache builder for the large SSL catalog |
 | [`ftw_ma/checkpoints.py`](ftw_ma/checkpoints.py) | Strict encoder-export checkpoint format |
-| [`run_lightning_fit.py`](run_lightning_fit.py) | Standalone Lightning DDP launcher |
+| [`run_lightning_fit.py`](run_lightning_fit.py) | Standalone Lightning DDP launcher for multi-GPU training |
 | [`tests/test_diffusion_pipeline.py`](tests/test_diffusion_pipeline.py) | Schedule, weighting, transfer, forward-pass, and no-unused-parameter regression tests |
+| [`tests/test_normalize.py`](tests/test_normalize.py) | NaN, infinity, negative-value, and nodata normalization tests |
+| [`tests/test_ssl_catalog_cache.py`](tests/test_ssl_catalog_cache.py) | Catalog cache and loader behavior tests |
 
 ## Supervised training and evaluation
 
