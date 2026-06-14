@@ -24,6 +24,7 @@ model:
     beta_end: 0.02
     cosine_s: 0.008
     max_beta: 0.999
+    min_timestep: 100
     loss: mse
     min_snr_gamma: 5.0
     centered_inputs: true

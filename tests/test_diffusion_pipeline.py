@@ -141,6 +141,55 @@ def test_timestep_conditioned_unet_forward_pass():
     assert output.shape == (2, 4, 32, 32)
 
 
+def test_diffusion_task_samples_configured_timestep_range():
+    from ftw_ma.diffusion_task import FTWDiffusionSSLTask
+
+    task = FTWDiffusionSSLTask(
+        in_channels=4,
+        timesteps=20,
+        min_timestep=3,
+        max_timestep=9,
+        model="ftw_efficientnet",
+        backbone="efficientnet-b0",
+        weights=None,
+        model_kwargs={
+            "time_embedding_dim": 16,
+            "time_condition_dim": 32,
+        },
+    )
+
+    t = task._sample_timesteps(256, torch.device("cpu"))
+
+    assert int(t.min()) >= 3
+    assert int(t.max()) <= 9
+
+
+def test_diffusion_task_initializes_from_checkpoint_weights_only(tmp_path):
+    from ftw_ma.diffusion_task import FTWDiffusionSSLTask
+
+    kwargs = {
+        "in_channels": 4,
+        "timesteps": 20,
+        "min_timestep": 3,
+        "max_timestep": 9,
+        "model": "ftw_efficientnet",
+        "backbone": "efficientnet-b0",
+        "weights": None,
+        "model_kwargs": {
+            "time_embedding_dim": 16,
+            "time_condition_dim": 32,
+        },
+    }
+    source = FTWDiffusionSSLTask(**kwargs)
+    path = tmp_path / "source.ckpt"
+    torch.save({"state_dict": source.state_dict()}, path)
+
+    target = FTWDiffusionSSLTask(**kwargs, init_from_checkpoint=str(path))
+
+    for key, value in source.state_dict().items():
+        assert torch.equal(value, target.state_dict()[key])
+
+
 def test_timestep_conditioned_unet_has_no_unused_trainable_parameters():
     from ftw_ma.diffusion_task import FTWEfficientNetDiffusionModel
 

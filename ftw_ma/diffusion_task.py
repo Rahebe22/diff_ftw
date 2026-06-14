@@ -161,6 +161,8 @@ class FTWDiffusionSSLTask(L.LightningModule):
         beta_end: float = 0.02,
         cosine_s: float = 0.008,
         max_beta: float = 0.999,
+        min_timestep: int = 0,
+        max_timestep: int | None = None,
         loss: str = "mse",
         min_snr_gamma: float | None = 5.0,
         centered_inputs: bool = True,
@@ -177,6 +179,7 @@ class FTWDiffusionSSLTask(L.LightningModule):
         t_max: int = 100,
         eta_min: float = 1e-5,
         model_kwargs: dict[str, Any] | None = None,
+        init_from_checkpoint: str | None = None,
     ) -> None:
         super().__init__()
         self.save_hyperparameters()
@@ -194,11 +197,24 @@ class FTWDiffusionSSLTask(L.LightningModule):
             raise ValueError("ema_decay must be in [0, 1)")
         if val_timestep_bins < 1:
             raise ValueError("val_timestep_bins must be positive")
+        if max_timestep is None:
+            max_timestep = timesteps - 1
+            self.hparams.max_timestep = max_timestep
+        if min_timestep < 0:
+            raise ValueError("min_timestep must be non-negative")
+        if max_timestep >= timesteps:
+            raise ValueError("max_timestep must be less than timesteps")
+        if min_timestep > max_timestep:
+            raise ValueError("min_timestep must be less than or equal to max_timestep")
 
         print("[DiffusionTask] Initializing FTW diffusion SSL task")
         print(
             f"[DiffusionTask] in_channels={in_channels}, "
             f"timesteps={timesteps}, noise_schedule={noise_schedule}"
+        )
+        print(
+            f"[DiffusionTask] active timestep range="
+            f"{min_timestep}-{max_timestep}"
         )
         print(
             f"[DiffusionTask] model={model}, backbone={backbone}, "
@@ -249,6 +265,14 @@ class FTWDiffusionSSLTask(L.LightningModule):
         _, alpha_bars = compute_alpha_schedule(betas_tensor)
         self.register_buffer("alpha_bars", alpha_bars)
         print("[DiffusionTask] Noise schedule ready")
+        if init_from_checkpoint:
+            self._init_from_checkpoint(init_from_checkpoint)
+
+    def _init_from_checkpoint(self, path: str) -> None:
+        checkpoint = torch.load(path, map_location="cpu")
+        state_dict = checkpoint.get("state_dict", checkpoint)
+        self.load_state_dict(state_dict, strict=True)
+        print(f"[DiffusionTask] Initialized weights from checkpoint: {path}")
 
     def forward(self, x: Tensor, t: Tensor, use_ema: bool = False) -> Tensor:
         denoiser = self.ema_model if use_ema else self.model
@@ -280,6 +304,14 @@ class FTWDiffusionSSLTask(L.LightningModule):
             return torch.ones_like(t, dtype=self.alpha_bars.dtype)
         return min_snr_weight(t, self.alpha_bars, self.hparams.min_snr_gamma)
 
+    def _sample_timesteps(self, batch_size: int, device: torch.device) -> Tensor:
+        return torch.randint(
+            self.hparams.min_timestep,
+            self.hparams.max_timestep + 1,
+            (batch_size,),
+            device=device,
+        )
+
     def _shared_step(
         self,
         batch: dict[str, Tensor],
@@ -306,7 +338,7 @@ class FTWDiffusionSSLTask(L.LightningModule):
             self._printed_val_batch = True
 
         batch_size = x0.size(0)
-        t = torch.randint(0, self.hparams.timesteps, (batch_size,), device=x0.device)
+        t = self._sample_timesteps(batch_size, x0.device)
         noise = torch.randn_like(x0)
         x_t = q_sample(x0, t, self.alpha_bars, noise)
         use_ema = split != "train" and self.hparams.use_ema_for_validation
@@ -424,7 +456,9 @@ class FTWDiffusionSSLTask(L.LightningModule):
 
     def _accumulate_timestep_losses(self, t: Tensor, losses: Tensor) -> None:
         bins = self.hparams.val_timestep_bins
-        bin_indices = (t * bins // self.hparams.timesteps).clamp(max=bins - 1)
+        span = self.hparams.max_timestep - self.hparams.min_timestep + 1
+        relative_t = t - self.hparams.min_timestep
+        bin_indices = (relative_t * bins // span).clamp(max=bins - 1)
         self._val_timestep_loss_sum.scatter_add_(0, bin_indices, losses)
         self._val_timestep_count.scatter_add_(
             0, bin_indices, torch.ones_like(losses)
@@ -445,11 +479,15 @@ class FTWDiffusionSSLTask(L.LightningModule):
         mean_val_loss = (loss_sum / loss_count.clamp_min(1)).item()
 
         bins = self.hparams.val_timestep_bins
-        bin_width = (self.hparams.timesteps + bins - 1) // bins
+        span = self.hparams.max_timestep - self.hparams.min_timestep + 1
+        bin_width = (span + bins - 1) // bins
         bin_messages = []
         for index in range(bins):
-            start = index * bin_width
-            end = min(self.hparams.timesteps - 1, (index + 1) * bin_width - 1)
+            start = self.hparams.min_timestep + index * bin_width
+            end = min(
+                self.hparams.max_timestep,
+                self.hparams.min_timestep + (index + 1) * bin_width - 1,
+            )
             bin_loss = timestep_loss_sum[index] / timestep_count[index].clamp_min(1)
             self.log(
                 f"val/loss_t_{start:04d}_{end:04d}",
@@ -545,7 +583,7 @@ class FTWDiffusionSSLTask(L.LightningModule):
 
     def _log_reconstruction_grid(self, batch: dict[str, Tensor]) -> None:
         x0 = self._prepare_images(batch["image"][:4])
-        t = torch.randint(0, self.hparams.timesteps, (x0.size(0),), device=x0.device)
+        t = self._sample_timesteps(x0.size(0), x0.device)
         noise = torch.randn_like(x0)
         x_t = q_sample(x0, t, self.alpha_bars, noise)
         pred_noise = self(

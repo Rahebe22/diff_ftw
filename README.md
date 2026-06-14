@@ -93,6 +93,7 @@ The large-scale experiment is configured in [`configs/custom/diff-ftw-224-ssl-30
 | Timestep conditioning | FiLM layers on encoder features and decoder blocks | Gives the denoiser explicit information about the current noise level at multiple feature scales. |
 | Input scaling | Normalized to `[0, 1]`, then centered to `[-1, 1]` inside the diffusion task | Aligns image values with the zero-centered Gaussian noise process. |
 | Noise schedule | 1000-step cosine schedule | Preserves signal more smoothly across the noising trajectory than the original linear schedule. |
+| Active timestep range | `100-999` for the AWS run | Avoids the near-clean timestep regime that produced unstable raw validation losses while contributing little useful denoising signal. |
 | Loss | Min-SNR weighted MSE, `gamma = 5.0` | Reduces domination by very easy high-SNR timesteps. |
 | Validation weights | EMA model | Evaluates and exports smoother weights than the instantaneous online model. |
 | Transfer output | `encoder_ema.pt` | Strict encoder-only checkpoint used by the supervised field-boundary model. |
@@ -166,6 +167,15 @@ weight_t = min(SNR_t, gamma) / SNR_t
 The current run uses `gamma = 5.0`. This makes the loss less dominated by nearly clean, high-SNR timesteps and gives the model a more balanced denoising curriculum across the 1000-step schedule.
 
 This repository currently uses a discrete DDPM-style objective. It does not currently implement EDM continuous noise sampling, latent diffusion, learned reverse variance, or a full reverse sampler for image generation. The purpose here is representation learning for boundary mapping, not producing synthetic satellite images.
+
+For the large AWS run, the active timestep range starts at `t = 100` instead
+of `t = 0`. Very low timesteps are almost clean images, so the noisy input
+contains very little information about the random Gaussian target noise. With
+Min-SNR weighting, those examples are also heavily downweighted during
+training. In practice, this made the first validation bin unstable while later
+denoising timesteps remained healthy. Since the goal is encoder pretraining,
+not a full image-generation sampler, the production SSL run focuses on
+meaningful denoising timesteps `100-999`.
 
 ### Model architecture
 
@@ -376,15 +386,19 @@ Detach from `tmux` with `Ctrl-b`, then `d`. Reattach later with:
 tmux attach -t diffusion300_ebs
 ```
 
-Resume from a checkpoint:
+To continue from a good diffusion checkpoint with a fresh optimizer, use
+`init_from_checkpoint` instead of `--ckpt_path`. This loads model and EMA
+weights only, while the new run uses the current config, learning rate, and
+active timestep range.
 
 ```bash
 python run_lightning_fit.py fit \
   -c configs/custom/diff-ftw-224-ssl-300ep-es5.yaml \
   --trainer.precision=32-true \
   --trainer.gradient_clip_val=1.0 \
-  --model.lr=5e-5 \
-  --ckpt_path /home/ubuntu/working/models/diffusion_ssl_300ep_es5/lightning_logs/version_X/checkpoints/last.ckpt
+  --trainer.sync_batchnorm=true \
+  --model.lr=1e-5 \
+  --model.init_from_checkpoint=/home/ubuntu/working/models/diffusion_ssl_300ep_es5/lightning_logs/version_X/checkpoints/epoch=1-val_loss=0.0428.ckpt
 ```
 
 ### Expected outputs
