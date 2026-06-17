@@ -280,6 +280,13 @@ catalog_cache_dir: /mnt/ebs_pretrain/ssl_catalog_cache
 
 The mounted S3 dataset at `/mnt/s3_pretrain` is useful as the source of truth, but it was too slow for sustained random small-file training. The large run stages the imagery on a 10,000 GiB gp3 EBS volume mounted at `/mnt/ebs_pretrain`. In the EBS smoke and benchmark runs, first-image reads were about `0.04s`, and first validation batches were ready in about `0.33s`.
 
+The AWS config also enables bad-image skipping for the SSL loader. If one
+image read raises an error or exceeds `60s`, the worker logs the rank, worker,
+sample index, error, and path, then tries the next sample. This prevents one
+corrupt or stalled chip from leaving one DDP rank behind until NCCL times out.
+The setting is intentionally conservative because normal EBS reads are much
+faster than one second.
+
 Build the local catalog cache once before the full run:
 
 ```bash

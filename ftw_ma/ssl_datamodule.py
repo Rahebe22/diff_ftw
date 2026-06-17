@@ -1,8 +1,10 @@
 import math
 import mmap
 import os
+import signal
 import threading
 import time
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
@@ -18,10 +20,38 @@ from torch.utils.data import DataLoader, Sampler, get_worker_info
 from .dataset import load_image
 
 
+class ImageReadTimeoutError(TimeoutError):
+    """Raised when one image read exceeds the configured timeout."""
+
+
 def _distributed_rank() -> int:
     if dist.is_available() and dist.is_initialized():
         return dist.get_rank()
     return int(os.environ.get("RANK", "0"))
+
+
+@contextmanager
+def _image_read_timeout(seconds: Optional[float]):
+    if seconds is None or seconds <= 0:
+        yield
+        return
+    if not hasattr(signal, "SIGALRM") or threading.current_thread() is not threading.main_thread():
+        yield
+        return
+
+    def _handle_timeout(signum, frame):
+        raise ImageReadTimeoutError(f"image read exceeded {seconds:.1f}s")
+
+    old_handler = signal.getsignal(signal.SIGALRM)
+    signal.signal(signal.SIGALRM, _handle_timeout)
+    old_timer = signal.setitimer(signal.ITIMER_REAL, seconds)
+    try:
+        yield
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, old_handler)
+        if old_timer[0] > 0:
+            signal.setitimer(signal.ITIMER_REAL, old_timer[0], old_timer[1])
 
 
 class DiagnosticDataLoader(DataLoader):
@@ -237,6 +267,9 @@ class FTWMapAfricaSSL(torch.utils.data.Dataset):
         nodata: list = None,
         transforms: Optional[Callable[[dict[str, Tensor]], dict[str, Tensor]]] = None,
         loader_startup_diagnostics: bool = False,
+        skip_bad_images: bool = False,
+        image_read_timeout_seconds: Optional[float] = None,
+        max_image_read_retries: int = 8,
     ) -> None:
         if split not in self.valid_splits:
             raise ValueError(f"split must be one of {self.valid_splits}, got {split}")
@@ -256,7 +289,13 @@ class FTWMapAfricaSSL(torch.utils.data.Dataset):
         self.nodata = nodata
         self.transforms = transforms
         self.loader_startup_diagnostics = loader_startup_diagnostics
+        self.skip_bad_images = skip_bad_images
+        self.image_read_timeout_seconds = image_read_timeout_seconds
+        self.max_image_read_retries = max_image_read_retries
         self._reported_first_image_read = False
+
+        if max_image_read_retries < 0:
+            raise ValueError("max_image_read_retries must be non-negative")
 
         if catalog_cache_dir is not None:
             if self.img_path_cols is None:
@@ -310,15 +349,55 @@ class FTWMapAfricaSSL(torch.utils.data.Dataset):
         return self._length
 
     def __getitem__(self, index: int) -> dict[str, Tensor]:
-        images = [
-            self._load_image(filename)
-            for filename in self.filenames[index]
-        ]
+        max_attempts = 1
+        if self.skip_bad_images:
+            max_attempts = min(len(self), self.max_image_read_retries + 1)
+
+        last_error = None
+        for attempt in range(max_attempts):
+            candidate_index = (index + attempt) % len(self)
+            filenames = self.filenames[candidate_index]
+            try:
+                images = [
+                    self._load_image(filename)
+                    for filename in filenames
+                ]
+                break
+            except Exception as error:
+                last_error = error
+                self._log_bad_sample(candidate_index, filenames, error, attempt)
+                if not self.skip_bad_images:
+                    raise
+        else:
+            raise RuntimeError(
+                "Unable to load a valid SSL image sample after "
+                f"{max_attempts} attempts starting from index {index}"
+            ) from last_error
+
         image = torch.from_numpy(np.concatenate(images, axis=0).astype("float32")).float()
         sample = {"image": image}
         if self.transforms is not None:
             sample = self.transforms(sample)
         return sample
+
+    def _log_bad_sample(
+        self,
+        index: int,
+        filenames: tuple[str, ...],
+        error: Exception,
+        attempt: int,
+    ) -> None:
+        worker = get_worker_info()
+        worker_id = worker.id if worker is not None else "main"
+        rank = _distributed_rank()
+        paths = [str(self.data_dir / filename) for filename in filenames]
+        print(
+            "[SSLData] skipping bad image sample "
+            f"rank={rank} worker={worker_id} index={index} "
+            f"attempt={attempt + 1}/{self.max_image_read_retries + 1} "
+            f"error={type(error).__name__}: {error} paths={paths}",
+            flush=True,
+        )
 
     def _load_image(self, filename: str) -> np.ndarray:
         path = self.data_dir / filename
@@ -337,15 +416,16 @@ class FTWMapAfricaSSL(torch.utils.data.Dataset):
                 flush=True,
             )
         try:
-            image = load_image(
-                path,
-                nodata_val_ls=self.nodata,
-                apply_normalization=True,
-                normal_strategy=self.normalization_strategy,
-                stat_procedure=self.normalization_stat_procedure,
-                global_stats=self.global_stats,
-                clip_val=self.img_clip_val,
-            )
+            with _image_read_timeout(self.image_read_timeout_seconds):
+                image = load_image(
+                    path,
+                    nodata_val_ls=self.nodata,
+                    apply_normalization=True,
+                    normal_strategy=self.normalization_strategy,
+                    stat_procedure=self.normalization_stat_procedure,
+                    global_stats=self.global_stats,
+                    clip_val=self.img_clip_val,
+                )
         except Exception:
             if report_read:
                 elapsed = time.monotonic() - start
@@ -387,6 +467,9 @@ class FTWMapAfricaSSLDataModule(LightningDataModule):
         use_constant_memory_sampler: bool = False,
         loader_startup_diagnostics: bool = False,
         loader_startup_log_interval_seconds: float = 30,
+        skip_bad_images: bool = False,
+        image_read_timeout_seconds: Optional[float] = None,
+        max_image_read_retries: int = 8,
         global_stats: Optional[Dict[str, List[float]]] = None,
         normalization_strategy: str = "min_max",
         normalization_stat_procedure: str = "lab",
@@ -411,6 +494,9 @@ class FTWMapAfricaSSLDataModule(LightningDataModule):
         self.loader_startup_log_interval_seconds = (
             loader_startup_log_interval_seconds
         )
+        self.skip_bad_images = skip_bad_images
+        self.image_read_timeout_seconds = image_read_timeout_seconds
+        self.max_image_read_retries = max_image_read_retries
         self.global_stats = global_stats
         self.normalization_strategy = normalization_strategy
         self.normalization_stat_procedure = normalization_stat_procedure
@@ -427,6 +513,9 @@ class FTWMapAfricaSSLDataModule(LightningDataModule):
             "img_clip_val": img_clip_val,
             "nodata": nodata,
             "loader_startup_diagnostics": loader_startup_diagnostics,
+            "skip_bad_images": skip_bad_images,
+            "image_read_timeout_seconds": image_read_timeout_seconds,
+            "max_image_read_retries": max_image_read_retries,
         }
 
         augs = []
@@ -474,6 +563,12 @@ class FTWMapAfricaSSLDataModule(LightningDataModule):
             f"{self.loader_startup_diagnostics}, "
             "loader_startup_log_interval_seconds="
             f"{self.loader_startup_log_interval_seconds}"
+        )
+        print(
+            "[SSLDataModule] skip_bad_images="
+            f"{self.skip_bad_images}, image_read_timeout_seconds="
+            f"{self.image_read_timeout_seconds}, max_image_read_retries="
+            f"{self.max_image_read_retries}"
         )
         print(
             f"[SSLDataModule] crop_size={self.crop_size}, "

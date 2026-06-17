@@ -129,3 +129,60 @@ def test_dataset_reports_only_first_image_read(monkeypatch, tmp_path, capsys):
     output = capsys.readouterr().out
     assert output.count("reading first image") == 1
     assert output.count("first image ready") == 1
+
+
+def test_dataset_skips_bad_image_when_enabled(monkeypatch, tmp_path, capsys):
+    catalog = tmp_path / "catalog.csv"
+    catalog.write_text(
+        "usage,image\n"
+        "train,2017/bad.tif\n"
+        "train,2017/good.tif\n"
+    )
+
+    def fake_load_image(path, *args, **kwargs):
+        if "bad.tif" in str(path):
+            raise OSError("cannot read test image")
+        return np.ones((4, 2, 2), dtype=np.float32)
+
+    monkeypatch.setattr("ftw_ma.ssl_datamodule.load_image", fake_load_image)
+    dataset = FTWMapAfricaSSL(
+        catalog=str(catalog),
+        data_dir=str(tmp_path),
+        split="train",
+        split_column="usage",
+        img_path_cols=["image"],
+        skip_bad_images=True,
+        max_image_read_retries=1,
+    )
+
+    sample = dataset[0]
+
+    assert torch.equal(sample["image"], torch.ones(4, 2, 2))
+    output = capsys.readouterr().out
+    assert "skipping bad image sample" in output
+    assert "bad.tif" in output
+
+
+def test_dataset_raises_bad_image_when_skip_disabled(monkeypatch, tmp_path):
+    catalog = tmp_path / "catalog.csv"
+    catalog.write_text("usage,image\ntrain,2017/bad.tif\n")
+
+    def fake_load_image(*args, **kwargs):
+        raise OSError("cannot read test image")
+
+    monkeypatch.setattr("ftw_ma.ssl_datamodule.load_image", fake_load_image)
+    dataset = FTWMapAfricaSSL(
+        catalog=str(catalog),
+        data_dir=str(tmp_path),
+        split="train",
+        split_column="usage",
+        img_path_cols=["image"],
+        skip_bad_images=False,
+    )
+
+    try:
+        dataset[0]
+    except OSError as error:
+        assert "cannot read test image" in str(error)
+    else:
+        raise AssertionError("Expected bad image read to raise")

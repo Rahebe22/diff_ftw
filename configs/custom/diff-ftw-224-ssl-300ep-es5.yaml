@@ -70,6 +70,9 @@ data:
     catalog_cache_dir: /mnt/ebs_pretrain/ssl_catalog_cache
     loader_startup_diagnostics: true
     loader_startup_log_interval_seconds: 30
+    skip_bad_images: true
+    image_read_timeout_seconds: 60
+    max_image_read_retries: 8
     split_column: usage
     img_path_cols: [image]
     crop_size: null
