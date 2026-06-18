@@ -138,7 +138,7 @@ Final artifact:        online EfficientNet-B7 encoder checkpoint
 The useful training artifact is:
 
 ```text
-/home/ubuntu/working/models/diffusion_ssl_300ep_es5/encoder_online.pt
+/mnt/ebs_pretrain/model_outputs/diffusion_ssl_300ep_es5/encoder_online.pt
 ```
 
 That file contains only the online EfficientNet encoder state dictionary and is intended for supervised field-boundary segmentation fine-tuning.
@@ -247,7 +247,7 @@ model:
     model: unet
     backbone: efficientnet-b7
     in_channels: 4
-    weights: /home/ubuntu/working/models/diffusion_ssl_300ep_es5/encoder_online.pt
+    weights: /mnt/ebs_pretrain/model_outputs/diffusion_ssl_300ep_es5/encoder_online.pt
 ```
 
 ### What changed from the first diffusion baseline
@@ -380,7 +380,7 @@ The configured `DDPProgressDiagnostics` callback writes one heartbeat file per
 rank under:
 
 ```text
-/home/ubuntu/working/models/diffusion_ssl_300ep_es5/ddp_diagnostics
+/mnt/ebs_pretrain/model_outputs/diffusion_ssl_300ep_es5/ddp_diagnostics
 ```
 
 At a stall, the last `phase`, `global_step`, and `batch_idx` in every rank file
@@ -467,7 +467,7 @@ python run_lightning_fit.py fit \
   --trainer.sync_batchnorm=false \
   --model.lr=1e-5 \
   --model.use_ema_for_validation=false \
-  --model.init_from_checkpoint=/home/ubuntu/working/models/diffusion_ssl_300ep_es5/lightning_logs/version_X/checkpoints/epoch=1-val_loss=0.0428.ckpt
+  --model.init_from_checkpoint=/mnt/ebs_pretrain/model_outputs/diffusion_ssl_300ep_es5/lightning_logs/version_X/checkpoints/epoch=1-val_loss=0.0428.ckpt
 ```
 
 ### Expected outputs
@@ -475,15 +475,22 @@ python run_lightning_fit.py fit \
 The full run writes under:
 
 ```text
-/home/ubuntu/working/models/diffusion_ssl_300ep_es5
+/mnt/ebs_pretrain/model_outputs/diffusion_ssl_300ep_es5
 ```
+
+The diffusion checkpoints contain model weights only because restarts use
+`model.init_from_checkpoint` with a fresh optimizer. `last.ckpt` is a symbolic
+link to the newest physical checkpoint, avoiding a second copy of the roughly
+550 MB model state at every epoch boundary. Keeping these files on the large
+EBS volume also prevents repeated `lightning_logs/version_*` runs from filling
+the instance root disk while the other DDP ranks wait at checkpoint barriers.
 
 Important outputs are:
 
 | Output | Meaning |
 |--------|---------|
 | `encoder_online.pt` | Online EfficientNet-B7 encoder for supervised transfer |
-| `last.ckpt` | Resume checkpoint |
+| `last.ckpt` | Link to the latest weights-only checkpoint |
 | best `epoch-*.ckpt` | Best checkpoint by `val_loss` |
 | `best_samples/*.png` | Validation diagnostic images |
 | Lightning logs | Training loss, validation loss, Min-SNR weights, timestep-binned losses |
