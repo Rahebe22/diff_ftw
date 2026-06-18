@@ -170,6 +170,7 @@ class FTWDiffusionSSLTask(L.LightningModule):
         use_ema_for_validation: bool = True,
         val_timestep_bins: int = 10,
         export_encoder_on_train_end: bool = True,
+        export_encoder_use_ema: bool = True,
         model: str = "ftw_efficientnet",
         backbone: str = "efficientnet-b7",
         weights: bool | str | None = True,
@@ -645,11 +646,17 @@ class FTWDiffusionSSLTask(L.LightningModule):
             self.hparams.export_encoder_on_train_end
             and self.trainer.is_global_zero
         ):
+            use_ema = self.hparams.export_encoder_use_ema
+            filename = "encoder_ema.pt" if use_ema else "encoder_online.pt"
             path = os.path.join(
-                self.trainer.default_root_dir, "encoder_ema.pt"
+                self.trainer.default_root_dir, filename
             )
-            self.export_encoder_checkpoint(path, use_ema=True)
-            print(f"[DiffusionTask] Exported EMA EfficientNet encoder to {path}")
+            self.export_encoder_checkpoint(path, use_ema=use_ema)
+            source = "EMA" if use_ema else "online"
+            print(
+                f"[DiffusionTask] Exported {source} EfficientNet encoder to "
+                f"{path}"
+            )
 
     def configure_optimizers(self):
         optimizer = AdamW(

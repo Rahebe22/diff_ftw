@@ -95,8 +95,8 @@ The large-scale experiment is configured in [`configs/custom/diff-ftw-224-ssl-30
 | Noise schedule | 1000-step cosine schedule | Preserves signal more smoothly across the noising trajectory than the original linear schedule. |
 | Active timestep range | `100-999` for the AWS run | Avoids the near-clean timestep regime that produced unstable raw validation losses while contributing little useful denoising signal. |
 | Loss | Min-SNR weighted MSE, `gamma = 5.0` | Reduces domination by very easy high-SNR timesteps. |
-| Validation weights | EMA model | Evaluates and exports smoother weights than the instantaneous online model. |
-| Transfer output | `encoder_ema.pt` | Strict encoder-only checkpoint used by the supervised field-boundary model. |
+| Validation weights | Online model | Evaluates the same parameters that the optimizer updates; EMA remains optional. |
+| Transfer output | `encoder_online.pt` | Strict encoder-only checkpoint used by the supervised field-boundary model. |
 
 ### Canonical references
 
@@ -132,16 +132,16 @@ DataLoader output:     image in [0, 1]
 Diffusion task input:  x_0 = 2 * image - 1, so x_0 is in [-1, 1]
 Training target:       sampled Gaussian noise epsilon
 Model output:          predicted 4-channel noise epsilon_theta(x_t, t)
-Final artifact:        EMA EfficientNet-B7 encoder checkpoint
+Final artifact:        online EfficientNet-B7 encoder checkpoint
 ```
 
 The useful training artifact is:
 
 ```text
-/home/ubuntu/working/models/diffusion_ssl_300ep_es5/encoder_ema.pt
+/home/ubuntu/working/models/diffusion_ssl_300ep_es5/encoder_online.pt
 ```
 
-That file contains only the EMA EfficientNet encoder state dictionary and is intended for supervised field-boundary segmentation fine-tuning.
+That file contains only the online EfficientNet encoder state dictionary and is intended for supervised field-boundary segmentation fine-tuning.
 
 ### Diffusion objective
 
@@ -218,7 +218,7 @@ timestep t
 
 The first raw input-like encoder feature is left unconditioned because the SMP U-Net decoder does not consume it. SMP also keeps EfficientNet classification-tail layers in the encoder object, but those layers are not executed in the U-Net feature path; they are frozen during diffusion pretraining to avoid unused trainable parameters in DDP.
 
-### EMA validation and encoder export
+### Online validation and encoder export
 
 Training maintains two model copies:
 
@@ -227,11 +227,15 @@ online model: updated by AdamW
 EMA model:    theta_ema = decay * theta_ema + (1 - decay) * theta_online
 ```
 
-The default EMA decay is `0.9999`. Validation uses the EMA model, and training end exports the EMA encoder.
+The task can maintain EMA weights with decay `0.9999`, but the production AWS
+configuration validates and exports the online model. Direct comparison showed
+stable online validation while the EMA copy produced extreme low-timestep
+errors. This keeps checkpoint selection tied to the parameters actually being
+optimized.
 
 Validation reports:
 
-- `val/loss`: EMA denoising loss used by checkpointing and early stopping.
+- `val/loss`: online-model denoising loss used by checkpointing and early stopping.
 - `val/loss_t_0000_0099` through `val/loss_t_0900_0999`: timestep-binned validation loss.
 - Best-sample diagnostics under `<default_root_dir>/best_samples`: clean image, noisy image, true noise, predicted noise, and reconstructed image.
 
@@ -243,7 +247,7 @@ model:
     model: unet
     backbone: efficientnet-b7
     in_channels: 4
-    weights: /home/ubuntu/working/models/diffusion_ssl_300ep_es5/encoder_ema.pt
+    weights: /home/ubuntu/working/models/diffusion_ssl_300ep_es5/encoder_online.pt
 ```
 
 ### What changed from the first diffusion baseline
@@ -255,9 +259,9 @@ model:
 | Input range | `[0, 1]` | DataLoader returns `[0, 1]`; diffusion task centers to `[-1, 1]` |
 | Noise schedule | Long linear schedule | 1000-step IDDPM-style cosine schedule |
 | Loss | Uniform MSE | Min-SNR weighted MSE with `gamma = 5.0` |
-| Validation model | Online weights | EMA weights |
+| Validation model | Online weights | Online weights; EMA retained as an optional diagnostic |
 | Validation detail | Aggregate loss | Aggregate loss plus ten timestep bins and image diagnostics |
-| Transfer artifact | Full checkpoint emphasis | Strict EMA encoder-only export |
+| Transfer artifact | Full checkpoint emphasis | Strict online encoder-only export |
 | Data path | Mounted S3 | Full large run staged on EBS for faster small-file reads |
 
 ### Pretraining data
@@ -332,6 +336,57 @@ gradient_clip_val: 1.0
 
 These overrides were used after an earlier full-epoch attempt with mixed precision and `lr = 2e-4` produced NaN losses. The normalizer and dataloader checks showed finite image batches, so the safer run treats this as an optimization-stability issue rather than a confirmed data-corruption issue.
 
+### Diagnosing repeated DDP timeouts
+
+Repeated NCCL watchdog messages are the final symptom, not the original
+failure. Use the following isolation tests before another full epoch.
+
+Test all eight GPUs and NCCL without the model or dataset:
+
+```bash
+torchrun --standalone --nproc_per_node=8 scripts/diagnose_nccl.py \
+  --iterations 10000 \
+  2>&1 | tee /home/ubuntu/working/logs/nccl_diagnostic.log
+```
+
+Test the final 501 distributed batches of the training epoch without GPUs or
+NCCL. Each process reads the samples assigned to one rank and writes a separate
+file:
+
+```bash
+mkdir -p /home/ubuntu/working/logs/data_diagnostic
+
+torchrun --standalone --nproc_per_node=8 scripts/diagnose_ssl_reads.py \
+  --catalog /mnt/ebs_pretrain/catalog_train_validate_80_20.csv \
+  --catalog-cache-dir /mnt/ebs_pretrain/ssl_catalog_cache \
+  --data-dir /mnt/ebs_pretrain \
+  --start-batch 145800 \
+  --num-batches 501 \
+  --output-dir /home/ubuntu/working/logs/data_diagnostic \
+  2>&1 | tee /home/ubuntu/working/logs/data_diagnostic.log
+```
+
+For a debug-enabled training run, prefix the normal command with
+`FTW_DDP_DEBUG=1` and save all terminal output:
+
+```bash
+FTW_DDP_DEBUG=1 python run_lightning_fit.py fit \
+  -c configs/custom/diff-ftw-224-ssl-300ep-es5.yaml \
+  --model.init_from_checkpoint=/path/to/best.ckpt \
+  2>&1 | tee /home/ubuntu/working/logs/diffusion_ddp_debug.log
+```
+
+The configured `DDPProgressDiagnostics` callback writes one heartbeat file per
+rank under:
+
+```text
+/home/ubuntu/working/models/diffusion_ssl_300ep_es5/ddp_diagnostics
+```
+
+At a stall, the last `phase`, `global_step`, and `batch_idx` in every rank file
+show whether the missing rank was waiting for data, running forward/backward,
+stepping the optimizer, or entering validation.
+
 ### How to run on AWS
 
 Activate the environment and install the repo in editable mode:
@@ -359,7 +414,9 @@ python run_lightning_fit.py fit \
   -c configs/custom/diff-ftw-smoke.yaml \
   --trainer.precision=32-true \
   --trainer.gradient_clip_val=1.0 \
-  --model.lr=5e-5
+  --trainer.sync_batchnorm=false \
+  --model.lr=1e-5 \
+  --model.use_ema_for_validation=false
 ```
 
 Run a short full-catalog benchmark:
@@ -372,7 +429,9 @@ python run_lightning_fit.py fit \
   --trainer.max_epochs=1 \
   --trainer.precision=32-true \
   --trainer.gradient_clip_val=1.0 \
-  --model.lr=5e-5
+  --trainer.sync_batchnorm=false \
+  --model.lr=1e-5 \
+  --model.use_ema_for_validation=false
 ```
 
 Start the 300-epoch run in `tmux` so it survives disconnection:
@@ -384,7 +443,9 @@ python run_lightning_fit.py fit \
   -c configs/custom/diff-ftw-224-ssl-300ep-es5.yaml \
   --trainer.precision=32-true \
   --trainer.gradient_clip_val=1.0 \
-  --model.lr=5e-5
+  --trainer.sync_batchnorm=false \
+  --model.lr=1e-5 \
+  --model.use_ema_for_validation=false
 ```
 
 Detach from `tmux` with `Ctrl-b`, then `d`. Reattach later with:
@@ -394,8 +455,8 @@ tmux attach -t diffusion300_ebs
 ```
 
 To continue from a good diffusion checkpoint with a fresh optimizer, use
-`init_from_checkpoint` instead of `--ckpt_path`. This loads model and EMA
-weights only, while the new run uses the current config, learning rate, and
+`init_from_checkpoint` instead of `--ckpt_path`. This loads model weights only,
+while the new run uses the current config, learning rate, and
 active timestep range.
 
 ```bash
@@ -403,8 +464,9 @@ python run_lightning_fit.py fit \
   -c configs/custom/diff-ftw-224-ssl-300ep-es5.yaml \
   --trainer.precision=32-true \
   --trainer.gradient_clip_val=1.0 \
-  --trainer.sync_batchnorm=true \
+  --trainer.sync_batchnorm=false \
   --model.lr=1e-5 \
+  --model.use_ema_for_validation=false \
   --model.init_from_checkpoint=/home/ubuntu/working/models/diffusion_ssl_300ep_es5/lightning_logs/version_X/checkpoints/epoch=1-val_loss=0.0428.ckpt
 ```
 
@@ -420,7 +482,7 @@ Important outputs are:
 
 | Output | Meaning |
 |--------|---------|
-| `encoder_ema.pt` | EMA EfficientNet-B7 encoder for supervised transfer |
+| `encoder_online.pt` | Online EfficientNet-B7 encoder for supervised transfer |
 | `last.ckpt` | Resume checkpoint |
 | best `epoch-*.ckpt` | Best checkpoint by `val_loss` |
 | `best_samples/*.png` | Validation diagnostic images |
@@ -430,7 +492,7 @@ Important outputs are:
 
 | File | Role |
 |------|------|
-| [`ftw_ma/diffusion_task.py`](ftw_ma/diffusion_task.py) | Denoiser, FiLM conditioning, weighted objective, EMA validation, diagnostics, and encoder export |
+| [`ftw_ma/diffusion_task.py`](ftw_ma/diffusion_task.py) | Denoiser, FiLM conditioning, weighted objective, online/EMA validation options, diagnostics, and encoder export |
 | [`diffusion/scheduler.py`](diffusion/scheduler.py) | Cosine schedule, forward noising process, timestep embeddings, SNR calculation, and Min-SNR weights |
 | [`ftw_ma/normalize.py`](ftw_ma/normalize.py) | Finite image normalization and nodata handling |
 | [`ftw_ma/ssl_datamodule.py`](ftw_ma/ssl_datamodule.py) | Image-only SSL dataset, memory-mapped catalog cache, constant-memory sampler, and loader diagnostics |
