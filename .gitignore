@@ -64,3 +64,4 @@ htmlcov/
 .Rproj.user
 *external/results*
 external/catalogs/*
+train_work_dir/

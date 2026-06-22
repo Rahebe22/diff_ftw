@@ -95,6 +95,7 @@ The large-scale experiment is configured in [`configs/custom/diff-ftw-224-ssl-30
 | Noise schedule | 1000-step cosine schedule | Preserves signal more smoothly across the noising trajectory than the original linear schedule. |
 | Active timestep range | `100-999` for the AWS run | Avoids the near-clean timestep regime that produced unstable raw validation losses while contributing little useful denoising signal. |
 | Loss | Min-SNR weighted MSE, `gamma = 5.0` | Reduces domination by very easy high-SNR timesteps. |
+| BatchNorm behavior | Running statistics frozen; affine scale and bias trainable | Prevents train/eval drift across very different diffusion noise levels without changing EfficientNet-B7. |
 | Validation weights | Online model | Evaluates the same parameters that the optimizer updates; EMA remains optional. |
 | Transfer output | `encoder_online.pt` | Strict encoder-only checkpoint used by the supervised field-boundary model. |
 
@@ -200,6 +201,15 @@ classes: 4
 ```
 
 The EfficientNet-B7 encoder architecture is intentionally left untouched. The diffusion-specific information is added through FiLM conditioning around the U-Net feature maps, not by changing the encoder blocks themselves.
+
+For the large AWS run, existing BatchNorm running means and variances are held
+fixed while each BatchNorm layer's learnable scale and bias remain trainable.
+Diffusion batches mix many noise levels, so a single accumulated running
+distribution can diverge from the per-batch statistics used during training.
+That mismatch appeared as an exploding first validation timestep bin even
+while training loss and later bins improved. Freezing only the running
+statistics makes training and validation use the same normalization behavior;
+it does not add, remove, or reshape any EfficientNet layer.
 
 FiLM applies a feature-wise scale and shift:
 
@@ -330,8 +340,9 @@ The stable full-epoch run used safer runtime overrides than the YAML defaults:
 
 ```text
 precision: 32-true
-learning rate: 5e-5
+learning rate: 1e-5
 gradient_clip_val: 1.0
+freeze_batchnorm_stats: true
 ```
 
 These overrides were used after an earlier full-epoch attempt with mixed precision and `lr = 2e-4` produced NaN losses. The normalizer and dataloader checks showed finite image batches, so the safer run treats this as an optimization-stability issue rather than a confirmed data-corruption issue.
@@ -416,6 +427,7 @@ python run_lightning_fit.py fit \
   --trainer.gradient_clip_val=1.0 \
   --trainer.sync_batchnorm=false \
   --model.lr=1e-5 \
+  --model.freeze_batchnorm_stats=true \
   --model.use_ema_for_validation=false
 ```
 
@@ -431,6 +443,7 @@ python run_lightning_fit.py fit \
   --trainer.gradient_clip_val=1.0 \
   --trainer.sync_batchnorm=false \
   --model.lr=1e-5 \
+  --model.freeze_batchnorm_stats=true \
   --model.use_ema_for_validation=false
 ```
 
@@ -445,6 +458,7 @@ python run_lightning_fit.py fit \
   --trainer.gradient_clip_val=1.0 \
   --trainer.sync_batchnorm=false \
   --model.lr=1e-5 \
+  --model.freeze_batchnorm_stats=true \
   --model.use_ema_for_validation=false
 ```
 
@@ -466,6 +480,7 @@ python run_lightning_fit.py fit \
   --trainer.gradient_clip_val=1.0 \
   --trainer.sync_batchnorm=false \
   --model.lr=1e-5 \
+  --model.freeze_batchnorm_stats=true \
   --model.use_ema_for_validation=false \
   --model.init_from_checkpoint=/mnt/ebs_pretrain/model_outputs/diffusion_ssl_300ep_es5/lightning_logs/version_X/checkpoints/epoch=1-val_loss=0.0428.ckpt
 ```

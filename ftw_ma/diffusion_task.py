@@ -5,6 +5,7 @@ import lightning as L
 import segmentation_models_pytorch as smp
 import torch
 import torch.distributed as dist
+import torch.nn as nn
 import torch.nn.functional as F
 from torch import Tensor
 from torch.optim import AdamW
@@ -168,6 +169,7 @@ class FTWDiffusionSSLTask(L.LightningModule):
         centered_inputs: bool = True,
         ema_decay: float = 0.9999,
         use_ema_for_validation: bool = True,
+        freeze_batchnorm_stats: bool = False,
         val_timestep_bins: int = 10,
         export_encoder_on_train_end: bool = True,
         export_encoder_use_ema: bool = True,
@@ -225,6 +227,10 @@ class FTWDiffusionSSLTask(L.LightningModule):
             f"[DiffusionTask] loss={loss}, min_snr_gamma={min_snr_gamma}, "
             f"ema_decay={ema_decay}, centered_inputs={centered_inputs}"
         )
+        print(
+            "[DiffusionTask] "
+            f"freeze_batchnorm_stats={freeze_batchnorm_stats}"
+        )
 
         unet_kwargs = dict(model_kwargs or {})
         time_embedding_dim = unet_kwargs.pop("time_embedding_dim", 128)
@@ -268,6 +274,30 @@ class FTWDiffusionSSLTask(L.LightningModule):
         print("[DiffusionTask] Noise schedule ready")
         if init_from_checkpoint:
             self._init_from_checkpoint(init_from_checkpoint)
+        if freeze_batchnorm_stats:
+            frozen_count = self._freeze_batchnorm_running_stats(self.model)
+            print(
+                "[DiffusionTask] Froze running statistics for "
+                f"{frozen_count} BatchNorm modules; affine parameters remain "
+                "trainable"
+            )
+
+    @staticmethod
+    def _freeze_batchnorm_running_stats(module: nn.Module) -> int:
+        frozen_count = 0
+        for child in module.modules():
+            if isinstance(child, nn.modules.batchnorm._BatchNorm):
+                child.eval()
+                frozen_count += 1
+        return frozen_count
+
+    def train(self, mode: bool = True) -> "FTWDiffusionSSLTask":
+        super().train(mode)
+        if mode and self.hparams.freeze_batchnorm_stats:
+            self._freeze_batchnorm_running_stats(self.model)
+        if hasattr(self, "ema_model"):
+            self.ema_model.eval()
+        return self
 
     def _init_from_checkpoint(self, path: str) -> None:
         checkpoint = torch.load(path, map_location="cpu")

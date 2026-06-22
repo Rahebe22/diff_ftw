@@ -32,6 +32,7 @@ model:
     centered_inputs: true
     ema_decay: 0.9999
     use_ema_for_validation: false
+    freeze_batchnorm_stats: true
     val_timestep_bins: 10
     export_encoder_on_train_end: false
     model: ftw_efficientnet

@@ -190,6 +190,48 @@ def test_diffusion_task_initializes_from_checkpoint_weights_only(tmp_path):
         assert torch.equal(value, target.state_dict()[key])
 
 
+def test_diffusion_task_freezes_batchnorm_stats_but_not_affine_parameters():
+    from ftw_ma.diffusion_task import FTWDiffusionSSLTask
+
+    task = FTWDiffusionSSLTask(
+        in_channels=4,
+        timesteps=20,
+        min_timestep=3,
+        max_timestep=9,
+        freeze_batchnorm_stats=True,
+        model="ftw_efficientnet",
+        backbone="efficientnet-b0",
+        weights=None,
+        model_kwargs={
+            "time_embedding_dim": 16,
+            "time_condition_dim": 32,
+        },
+    )
+
+    batchnorm_modules = [
+        module
+        for module in task.model.modules()
+        if isinstance(module, torch.nn.modules.batchnorm._BatchNorm)
+    ]
+    affine_parameters = [
+        parameter
+        for module in batchnorm_modules
+        for parameter in module.parameters(recurse=False)
+    ]
+    requires_grad_before = [
+        parameter.requires_grad for parameter in affine_parameters
+    ]
+
+    task.train()
+
+    assert batchnorm_modules
+    assert all(not module.training for module in batchnorm_modules)
+    assert any(requires_grad_before)
+    assert [
+        parameter.requires_grad for parameter in affine_parameters
+    ] == requires_grad_before
+
+
 def test_timestep_conditioned_unet_has_no_unused_trainable_parameters():
     from ftw_ma.diffusion_task import FTWEfficientNetDiffusionModel
 
