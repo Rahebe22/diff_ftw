@@ -4,14 +4,13 @@ trainer:
   num_sanity_val_steps: 0
   log_every_n_steps: 10
   accelerator: cuda
-  devices: [0, 1, 2, 3, 4, 5, 6, 7]
-  strategy: ddp_find_unused_parameters_false
+  devices: [0, 1, 2]
+  strategy: ddp_find_unused_parameters_true
   use_distributed_sampler: false
   precision: 32-true
   gradient_clip_val: 1.0
   sync_batchnorm: false
-  # Keep large epoch-end writes off the small instance root volume.
-  default_root_dir: /mnt/ebs_pretrain/model_outputs/diffusion_ssl_300ep_es5
+  default_root_dir: ./work_dir/diffusion_ssl_300ep_es5_2
   callbacks:
     - class_path: lightning.pytorch.callbacks.ModelCheckpoint
       init_args:
